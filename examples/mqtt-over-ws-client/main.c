@@ -28,11 +28,11 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   } else if (ev == MG_EV_WS_OPEN) {
     // WS connection established. Perform MQTT login
     LOG(LL_INFO, ("Connected to WS. Logging in to MQTT..."));
-    struct mg_mqtt_opts opts = {.qos = 1,
+    struct mg_mqtt_opts opts = {.will_qos = 1,
                                 .will_topic = mg_str(s_topic),
                                 .will_message = mg_str("goodbye")};
     size_t len = c->send.len;
-    mg_mqtt_login(c, s_url, &opts);
+    mg_mqtt_login(c, &opts);
     mg_ws_wrap(c, c->send.len - len, WEBSOCKET_OP_BINARY);
   } else if (ev == MG_EV_WS_MSG) {
     struct mg_mqtt_message mm;
@@ -46,10 +46,10 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
             struct mg_str topic = mg_str(s_topic), data = mg_str("hello");
             size_t len = c->send.len;
             LOG(LL_INFO, ("CONNECTED to %s", s_url));
-            mg_mqtt_sub(c, &topic, 1);
+            mg_mqtt_sub(c, topic, 1);
             mg_ws_wrap(c, len, WEBSOCKET_OP_BINARY);
             LOG(LL_INFO, ("SUBSCRIBED to %.*s", (int) topic.len, topic.ptr));
-            mg_mqtt_pub(c, &topic, &data, 1, false);
+            mg_mqtt_pub(c, topic, data, 1, false);
             LOG(LL_INFO, ("PUBSLISHED %.*s -> %.*s", (int) data.len, data.ptr,
                           (int) topic.len, topic.ptr));
             len = mg_ws_wrap(c, c->send.len - len, WEBSOCKET_OP_BINARY);

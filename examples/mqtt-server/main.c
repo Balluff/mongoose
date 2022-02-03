@@ -20,6 +20,12 @@ struct sub {
 };
 static struct sub *s_subs = NULL;
 
+// Handle interrupts, like Ctrl-C
+static int s_signo;
+static void signal_handler(int signo) {
+  s_signo = signo;
+}
+
 // Event handler function
 static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   if (ev == MG_EV_MQTT_CMD) {
@@ -53,6 +59,10 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
           LIST_ADD_HEAD(struct sub, &s_subs, sub);
           LOG(LL_INFO,
               ("SUB %p [%.*s]", c->fd, (int) sub->topic.len, sub->topic.ptr));
+          // Change '+' to '*' for topic matching using mg_match
+          for (size_t i = 0; i < sub->topic.len; i++) {
+            if (sub->topic.ptr[i] == '+') ((char *) sub->topic.ptr)[i] = '*';
+          }
           resp[num_topics++] = qos;
         }
         mg_mqtt_send_header(c, MQTT_CMD_SUBACK, 0, num_topics + 2);
@@ -66,8 +76,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
         LOG(LL_INFO, ("PUB %p [%.*s] -> [%.*s]", c->fd, (int) mm->data.len,
                       mm->data.ptr, (int) mm->topic.len, mm->topic.ptr));
         for (struct sub *sub = s_subs; sub != NULL; sub = sub->next) {
-          if (mg_strcmp(mm->topic, sub->topic) != 0) continue;
-          mg_mqtt_pub(sub->c, &mm->topic, &mm->data, 1, false);
+          if (mg_match(mm->topic, sub->topic, NULL)) {
+            mg_mqtt_pub(sub->c, mm->topic, mm->data, 1, false);
+          }
         }
         break;
       }
@@ -88,10 +99,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
 }
 
 int main(void) {
-  struct mg_mgr mgr;                            // Event manager
-  mg_mgr_init(&mgr);                            // Initialise event manager
-  mg_mqtt_listen(&mgr, s_listen_on, fn, NULL);  // Create MQTT listener
-  for (;;) mg_mgr_poll(&mgr, 1000);             // Infinite event loop
-  mg_mgr_free(&mgr);
+  struct mg_mgr mgr;                // Event manager
+  signal(SIGINT, signal_handler);   // Setup signal handlers - exist event
+  signal(SIGTERM, signal_handler);  // manager loop on SIGINT and SIGTERM
+  mg_mgr_init(&mgr);                // Initialise event manager
+  LOG(LL_INFO, ("Starting on %s", s_listen_on));  // Inform that we're starting
+  mg_mqtt_listen(&mgr, s_listen_on, fn, NULL);    // Create MQTT listener
+  while (s_signo == 0) mg_mgr_poll(&mgr, 1000);   // Event loop, 1s timeout
+  mg_mgr_free(&mgr);                              // Cleanup
   return 0;
 }

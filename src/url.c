@@ -1,5 +1,5 @@
-#include <stdlib.h>
 #include "url.h"
+#include <stdlib.h>
 
 struct url {
   size_t key, user, pass, host, port, uri, end;
@@ -45,10 +45,6 @@ struct mg_str mg_url_host(const char *url) {
              : u.uri ? u.uri - u.host
                      : u.end - u.host;
   struct mg_str s = mg_str_n(url + u.host, n);
-  if (s.len > 2 && s.ptr[0] == '[' && s.ptr[s.len - 1] == ']') {
-    s.len -= 2;
-    s.ptr++;
-  }
   return s;
 }
 
@@ -60,10 +56,11 @@ const char *mg_url_uri(const char *url) {
 unsigned short mg_url_port(const char *url) {
   struct url u = urlparse(url);
   unsigned short port = 0;
-  if (memcmp(url, "http:", 5) == 0 || memcmp(url, "ws:", 3) == 0) port = 80;
-  if (memcmp(url, "wss:", 4) == 0 || memcmp(url, "https:", 6) == 0) port = 443;
-  if (memcmp(url, "mqtt:", 5) == 0) port = 1883;
-  if (memcmp(url, "mqtts:", 6) == 0) port = 8883;
+  if (strncmp(url, "http:", 5) == 0 || strncmp(url, "ws:", 3) == 0) port = 80;
+  if (strncmp(url, "wss:", 4) == 0 || strncmp(url, "https:", 6) == 0)
+    port = 443;
+  if (strncmp(url, "mqtt:", 5) == 0) port = 1883;
+  if (strncmp(url, "mqtts:", 6) == 0) port = 8883;
   if (u.port) port = (unsigned short) atoi(url + u.port);
   return port;
 }

@@ -5,10 +5,10 @@
 #include "mongoose.h"
 
 static const char *s_debug_level = "2";
-static const char *s_root_dir = ".";
-static const char *s_listening_address = "http://localhost:8000";
+static const char *s_root_dir = NULL;
+static const char *s_listening_address = "http://0.0.0.0:8000";
 static const char *s_enable_hexdump = "no";
-static const char *s_ssi_pattern = "#.shtml";
+static const char *s_ssi_pattern = "#.html";
 
 // Handle interrupts, like Ctrl-C
 static int s_signo;
@@ -20,9 +20,18 @@ static void signal_handler(int signo) {
 // Simply serve static files from `s_root_dir`
 static void cb(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   if (ev == MG_EV_HTTP_MSG) {
-    struct mg_http_serve_opts opts = {.root_dir = s_root_dir,
-                                      .ssi_pattern = s_ssi_pattern};
-    mg_http_serve_dir(c, ev_data, &opts);
+    struct mg_http_message *hm = ev_data, tmp = {};
+    struct mg_str unknown = mg_str_n("?", 1), *cl;
+    struct mg_http_serve_opts opts = {0};
+    opts.root_dir = s_root_dir;
+    opts.ssi_pattern = s_ssi_pattern;
+    mg_http_serve_dir(c, hm, &opts);
+    mg_http_parse((char *) c->send.buf, c->send.len, &tmp);
+    cl = mg_http_get_header(&tmp, "Content-Length");
+    if (cl == NULL) cl = &unknown;
+    LOG(LL_INFO, ("%.*s %.*s %.*s %.*s", (int) hm->method.len, hm->method.ptr,
+                  (int) hm->uri.len, hm->uri.ptr, (int) tmp.uri.len,
+                  tmp.uri.ptr, (int) cl->len, cl->ptr));
   }
   (void) fn_data;
 }
@@ -32,16 +41,17 @@ static void usage(const char *prog) {
           "Mongoose v.%s\n"
           "Usage: %s OPTIONS\n"
           "  -H yes|no - enable traffic hexdump, default: '%s'\n"
-          "  -S GLOB   - glob pattern for SSI files, default: '%s'\n"
+          "  -S PAT    - SSI filename pattern, default: '%s'\n"
           "  -d DIR    - directory to serve, default: '%s'\n"
           "  -l ADDR   - listening address, default: '%s'\n"
           "  -v LEVEL  - debug level, from 0 to 4, default: '%s'\n",
-          MG_VERSION, prog, s_debug_level, s_enable_hexdump, s_ssi_pattern,
-          s_root_dir, s_listening_address);
+          MG_VERSION, prog, s_enable_hexdump, s_ssi_pattern, s_root_dir,
+          s_listening_address, s_debug_level);
   exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[]) {
+  char path[MG_PATH_MAX] = ".";
   struct mg_mgr mgr;
   struct mg_connection *c;
   int i;
@@ -63,6 +73,13 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // Root directory must not contain double dots. Make it absolute
+  // Do the conversion only if the root dir spec does not contain overrides
+  if (strchr(s_root_dir, ',') == NULL) {
+    realpath(s_root_dir, path);
+    s_root_dir = path;
+  }
+
   // Initialise stuff
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
@@ -76,7 +93,9 @@ int main(int argc, char *argv[]) {
   if (mg_casecmp(s_enable_hexdump, "yes") == 0) c->is_hexdumping = 1;
 
   // Start infinite event loop
-  LOG(LL_INFO, ("Starting Mongoose v%s, serving [%s]", MG_VERSION, s_root_dir));
+  LOG(LL_INFO, ("Mongoose version : v%s", MG_VERSION));
+  LOG(LL_INFO, ("Listening on     : %s", s_listening_address));
+  LOG(LL_INFO, ("Web root         : [%s]", s_root_dir));
   while (s_signo == 0) mg_mgr_poll(&mgr, 1000);
   mg_mgr_free(&mgr);
   LOG(LL_INFO, ("Exiting on signal %d", s_signo));

@@ -19,18 +19,18 @@ int mg_printf(struct mg_connection *c, const char *fmt, ...) {
   return len;
 }
 
-char *mg_straddr(struct mg_connection *c, char *buf, size_t len) {
-  char tmp[100];
-  const char *fmt = c->peer.is_ip6 ? "[%s]:%d" : "%s:%d";
-  mg_ntoa(&c->peer, tmp, sizeof(tmp));
-  snprintf(buf, len, fmt, tmp, (int) mg_ntohs(c->peer.port));
+char *mg_straddr(struct mg_addr *a, char *buf, size_t len) {
+  char tmp[30];
+  const char *fmt = a->is_ip6 ? "[%s]:%d" : "%s:%d";
+  mg_ntoa(a, tmp, sizeof(tmp));
+  snprintf(buf, len, fmt, tmp, (int) mg_ntohs(a->port));
   return buf;
 }
 
 char *mg_ntoa(const struct mg_addr *addr, char *buf, size_t len) {
   if (addr->is_ip6) {
     uint16_t *p = (uint16_t *) addr->ip6;
-    snprintf(buf, len, "%x:%x:%x:%x:%x:%x:%x:%x", mg_htons(p[0]),
+    snprintf(buf, len, "%hx:%hx:%hx:%hx:%hx:%hx:%hx:%hx", mg_htons(p[0]),
              mg_htons(p[1]), mg_htons(p[2]), mg_htons(p[3]), mg_htons(p[4]),
              mg_htons(p[5]), mg_htons(p[6]), mg_htons(p[7]));
   } else {
@@ -45,6 +45,13 @@ char *mg_ntoa(const struct mg_addr *addr, char *buf, size_t len) {
 static bool mg_atonl(struct mg_str str, struct mg_addr *addr) {
   if (mg_vcasecmp(&str, "localhost") != 0) return false;
   addr->ip = mg_htonl(0x7f000001);
+  addr->is_ip6 = false;
+  return true;
+}
+
+static bool mg_atone(struct mg_str str, struct mg_addr *addr) {
+  if (str.len > 0) return false;
+  addr->ip = 0;
   addr->is_ip6 = false;
   return true;
 }
@@ -87,6 +94,7 @@ static bool mg_v4mapped(struct mg_str str, struct mg_addr *addr) {
 
 static bool mg_aton6(struct mg_str str, struct mg_addr *addr) {
   size_t i, j = 0, n = 0, dc = 42;
+  if (str.len > 2 && str.ptr[0] == '[') str.ptr++, str.len -= 2;
   if (mg_v4mapped(str, addr)) return true;
   for (i = 0; i < str.len; i++) {
     if ((str.ptr[i] >= '0' && str.ptr[i] <= '9') ||
@@ -124,7 +132,8 @@ static bool mg_aton6(struct mg_str str, struct mg_addr *addr) {
 
 bool mg_aton(struct mg_str str, struct mg_addr *addr) {
   // LOG(LL_INFO, ("[%.*s]", (int) str.len, str.ptr));
-  return mg_atonl(str, addr) || mg_aton4(str, addr) || mg_aton6(str, addr);
+  return mg_atone(str, addr) || mg_atonl(str, addr) || mg_aton4(str, addr) ||
+         mg_aton6(str, addr);
 }
 
 void mg_mgr_free(struct mg_mgr *mgr) {

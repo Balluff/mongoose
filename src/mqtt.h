@@ -18,15 +18,13 @@
 #define MQTT_CMD_PINGRESP 13
 #define MQTT_CMD_DISCONNECT 14
 
-#define MQTT_QOS(qos) ((qos) << 1)
-#define MQTT_GET_QOS(flags) (((flags) &0x6) >> 1)
-#define MQTT_SET_QOS(flags, qos) (flags) = ((flags) & ~0x6) | ((qos) << 1)
-
 struct mg_mqtt_opts {
+  struct mg_str user;          // Username, can be empty
+  struct mg_str pass;          // Password, can be empty
   struct mg_str client_id;     // Client ID
   struct mg_str will_topic;    // Will topic
   struct mg_str will_message;  // Will message
-  uint8_t qos;                 // Quality of service
+  uint8_t will_qos;            // Will message quality of service
   bool will_retain;            // Retain last will
   bool clean;                  // Use clean session, 0 or 1
   uint16_t keepalive;          // Keep-alive timer in seconds
@@ -47,11 +45,10 @@ struct mg_connection *mg_mqtt_connect(struct mg_mgr *, const char *url,
                                       mg_event_handler_t fn, void *fn_data);
 struct mg_connection *mg_mqtt_listen(struct mg_mgr *mgr, const char *url,
                                      mg_event_handler_t fn, void *fn_data);
-void mg_mqtt_login(struct mg_connection *c, const char *url,
-                   struct mg_mqtt_opts *opts);
-void mg_mqtt_pub(struct mg_connection *c, struct mg_str *topic,
-                 struct mg_str *data, int qos, bool retain);
-void mg_mqtt_sub(struct mg_connection *, struct mg_str *topic, int qos);
+void mg_mqtt_login(struct mg_connection *c, struct mg_mqtt_opts *opts);
+void mg_mqtt_pub(struct mg_connection *c, struct mg_str topic,
+                 struct mg_str data, int qos, bool retain);
+void mg_mqtt_sub(struct mg_connection *, struct mg_str topic, int qos);
 int mg_mqtt_parse(const uint8_t *buf, size_t len, struct mg_mqtt_message *m);
 void mg_mqtt_send_header(struct mg_connection *, uint8_t cmd, uint8_t flags,
                          uint32_t len);

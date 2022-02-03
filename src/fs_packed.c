@@ -57,24 +57,20 @@ static void packed_list(const char *dir, void (*fn)(const char *, void *),
   }
 }
 
-static struct mg_fd *packed_open(const char *path, int flags) {
+static void *packed_open(const char *path, int flags) {
   size_t size = 0;
   const char *data = mg_unpack(path, &size, NULL);
   struct packed_file *fp = NULL;
-  struct mg_fd *fd = NULL;
   if (data == NULL) return NULL;
   if (flags & MG_FS_WRITE) return NULL;
   fp = (struct packed_file *) calloc(1, sizeof(*fp));
-  fd = (struct mg_fd *) calloc(1, sizeof(*fd));
   fp->size = size;
   fp->data = data;
-  fd->fd = fp;
-  fd->fs = &mg_fs_packed;
-  return fd;
+  return (void *) fp;
 }
 
-static void packed_close(struct mg_fd *fd) {
-  if (fd) free(fd->fd), free(fd);
+static void packed_close(void *fp) {
+  if (fp != NULL) free(fp);
 }
 
 static size_t packed_read(void *fd, void *buf, size_t len) {
@@ -97,6 +93,21 @@ static size_t packed_seek(void *fd, size_t offset) {
   return fp->pos;
 }
 
-struct mg_fs mg_fs_packed = {packed_stat,  packed_list, packed_open,
-                             packed_close, packed_read, packed_write,
-                             packed_seek};
+static bool packed_rename(const char *from, const char *to) {
+  (void) from, (void) to;
+  return false;
+}
+
+static bool packed_remove(const char *path) {
+  (void) path;
+  return false;
+}
+
+static bool packed_mkdir(const char *path) {
+  (void) path;
+  return false;
+}
+
+struct mg_fs mg_fs_packed = {
+    packed_stat,  packed_list, packed_open,   packed_close,  packed_read,
+    packed_write, packed_seek, packed_rename, packed_remove, packed_mkdir};

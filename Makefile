@@ -1,36 +1,37 @@
 SRCS = mongoose.c test/unit_test.c test/packed_fs.c
 HDRS = $(wildcard src/*.h)
 DEFS ?= -DMG_MAX_HTTP_HEADERS=7 -DMG_ENABLE_LINES -DMG_ENABLE_PACKED_FS=1
-WARN ?= -W -Wall -Werror -Wshadow -Wdouble-promotion -fno-common -Wconversion
+WARN ?= -W -Wall -Werror -Wshadow -Wdouble-promotion -fno-common -Wconversion -Wundef
 OPTS ?= -O3 -g3
 INCS ?= -Isrc -I.
-CFLAGS ?= $(OPTS) $(WARN) $(INCS) $(DEFS) $(TFLAGS) $(EXTRA)
 SSL ?= MBEDTLS
 CWD ?= $(realpath $(CURDIR))
 DOCKER ?= docker run --rm -e Tmp=. -e WINEDEBUG=-all -v $(CWD):$(CWD) -w $(CWD)
 VCFLAGS = /nologo /W3 /O2 /I. $(DEFS) $(TFLAGS)
 IPV6 ?= 1
-ASAN_OPTIONS ?=
+ASAN ?= -fsanitize=address,undefined
+ASAN_OPTIONS ?= detect_leaks=1
 EXAMPLES := $(wildcard examples/*)
 PREFIX ?= /usr/local
-SOVERSION = 7.4
+VERSION ?= $(shell cut -d'"' -f2 src/version.h)
+CFLAGS ?= $(OPTS) $(WARN) $(INCS) $(DEFS) $(ASAN) -DMG_ENABLE_IPV6=$(IPV6) $(TFLAGS) $(EXTRA)
 .PHONY: examples test
 
 ifeq "$(SSL)" "MBEDTLS"
-MBEDTLS ?= /usr
+MBEDTLS ?= /usr/local
 CFLAGS  += -DMG_ENABLE_MBEDTLS=1 -I$(MBEDTLS)/include -I/usr/include
 LDFLAGS ?= -L$(MBEDTLS)/lib -lmbedtls -lmbedcrypto -lmbedx509
 endif
 ifeq "$(SSL)" "OPENSSL"
-OPENSSL ?= /usr
+OPENSSL ?= /usr/local
 CFLAGS  += -DMG_ENABLE_OPENSSL=1 -I$(OPENSSL)/include
 LDFLAGS ?= -L$(OPENSSL)/lib -lssl -lcrypto
 endif
 
-all: mg_prefix unpacked test test++ arm examples vc98 vc2017 mingw mingw++ linux linux++ fuzz
+all: mg_prefix unamalgamated unpacked test test++ arm examples vc98 vc2017 mingw mingw++ linux linux++ fuzz
 
 examples:
-	@for X in $(EXAMPLES); do $(MAKE) -C $$X example || break; done
+	@for X in $(EXAMPLES); do test -f $$X/Makefile || continue; $(MAKE) -C $$X example || exit 1; done
 
 test/packed_fs.c: Makefile src/fs.h src/ssi.h test/fuzz.c test/data/a.txt
 	$(CC) $(CFLAGS) test/pack.c -o pack
@@ -59,7 +60,6 @@ fuzz: fuzzer
 	$(RUN) ./fuzzer
 
 # make CC=/usr/local/opt/llvm\@8/bin/clang ASAN_OPTIONS=detect_leaks=1
-test: CFLAGS += -DMG_ENABLE_IPV6=$(IPV6) -fsanitize=address#,undefined
 test: mongoose.h  Makefile $(SRCS)
 	$(CC) $(SRCS) $(CFLAGS) -coverage $(LDFLAGS) -g -o unit_test
 	ASAN_OPTIONS=$(ASAN_OPTIONS) $(RUN) ./unit_test
@@ -98,8 +98,6 @@ mingw++: Makefile mongoose.h $(SRCS)
 	$(DOCKER) mdashnet/mingw i686-w64-mingw32-g++ $(SRCS) -W -Wall -Werror -I. $(DEFS) -lwsock32 -o test.exe
   # Note: for some reason, a binary built with mingw g++, fails to run
 
-#linux: CFLAGS += -DMG_ENABLE_IPV6=$(IPV6)
-linux: CFLAGS += -fsanitize=address,undefined
 linux: Makefile mongoose.h $(SRCS)
 	$(DOCKER) mdashnet/cc2 gcc $(SRCS) $(CFLAGS) $(LDFLAGS) -o unit_test_gcc
 	$(DOCKER) mdashnet/cc2 ./unit_test_gcc
@@ -110,23 +108,23 @@ linux++: linux
 
 linux-libs: CFLAGS += -fPIC
 linux-libs: mongoose.o
-	$(CC) mongoose.o $(LDFLAGS) -shared -o libmongoose.so.$(SOVERSION)
+	$(CC) mongoose.o $(LDFLAGS) -shared -o libmongoose.so.$(VERSION)
 	$(AR) rcs libmongoose.a mongoose.o
 
 install: linux-libs
-	install -Dm644 libmongoose.a libmongoose.so.$(SOVERSION) $(DESTDIR)$(PREFIX)/lib
-	ln -s libmongoose.so.$(SOVERSION) $(DESTDIR)$(PREFIX)/lib/libmongoose.so
+	install -Dm644 libmongoose.a libmongoose.so.$(VERSION) $(DESTDIR)$(PREFIX)/lib
+	ln -s libmongoose.so.$(VERSION) $(DESTDIR)$(PREFIX)/lib/libmongoose.so
 	install -Dm644 mongoose.h $(DESTDIR)$(PREFIX)/include/mongoose.h
 
 uninstall:
-	rm -rf $(DESTDIR)$(PREFIX)/lib/libmongoose.a $(DESTDIR)$(PREFIX)/lib/libmongoose.so.$(SOVERSION) $(DESTDIR)$(PREFIX)/include/mongoose.h $(DESTDIR)$(PREFIX)/lib/libmongoose.so
+	rm -rf $(DESTDIR)$(PREFIX)/lib/libmongoose.a $(DESTDIR)$(PREFIX)/lib/libmongoose.so.$(VERSION) $(DESTDIR)$(PREFIX)/include/mongoose.h $(DESTDIR)$(PREFIX)/lib/libmongoose.so
 
 mongoose.c: Makefile $(wildcard src/*)
-	(cat src/license.h; echo; echo '#include "mongoose.h"' ; (for F in src/private.h src/*.c ; do echo; echo '#ifdef MG_ENABLE_LINES'; echo "#line 1 \"$$F\""; echo '#endif'; cat $$F | sed -e 's,#include ".*,,'; done))> $@
+	(cat src/license.h; echo; echo '#include "mongoose.h"' ; (for F in src/*.c ; do echo; echo '#ifdef MG_ENABLE_LINES'; echo "#line 1 \"$$F\""; echo '#endif'; cat $$F | sed -e 's,#include ".*,,'; done))> $@
 
 mongoose.h: $(HDRS) Makefile
-	(cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/config.h src/arch.h src/arch_*.h src/str.h src/log.h src/timer.h src/util.h src/fs.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/ws.h src/sntp.h src/mqtt.h src/dns.h | sed -e 's,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
+	(cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/config.h src/str.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h | sed -e 's,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
 
 clean:
 	rm -rf $(PROG) *.o *.dSYM unit_test* ut fuzzer *.gcov *.gcno *.gcda *.obj *.exe *.ilk *.pdb slow-unit* _CL_* infer-out data.txt crash-* test/packed_fs.c pack
-	@for X in $(EXAMPLES); do $(MAKE) -C $$X clean; done
+	@for X in $(EXAMPLES); do test -f $$X/Makefile && $(MAKE) -C $$X clean; done

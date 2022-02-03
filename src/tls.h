@@ -1,12 +1,17 @@
 #pragma once
+
 #include "net.h"
+#include "tls_mbed.h"
+#include "tls_openssl.h"
 
 struct mg_tls_opts {
   const char *ca;         // CA certificate file. For both listeners and clients
+  const char *crl;        // Certificate Revocation List. For clients
   const char *cert;       // Certificate
   const char *certkey;    // Certificate key
   const char *ciphers;    // Cipher list
   struct mg_str srvname;  // If not empty, enables server name verification
+  struct mg_fs *fs;       // FS API for reading certificate files
 };
 
 void mg_tls_init(struct mg_connection *, struct mg_tls_opts *);

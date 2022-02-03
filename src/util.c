@@ -1,61 +1,8 @@
-#include "config.h"  // Must go first - important for test++
-
 #include "util.h"
 
-char *mg_file_read(const char *path, size_t *sizep) {
-  FILE *fp;
-  char *data = NULL;
-  size_t size = 0;
-  if ((fp = fopen(path, "rb")) != NULL) {
-    fseek(fp, 0, SEEK_END);
-    size = (size_t) ftell(fp);
-    rewind(fp);
-    data = (char *) calloc(1, size + 1);
-    if (data != NULL) {
-      if (fread(data, 1, size, fp) != size) {
-        free(data);
-        data = NULL;
-      } else {
-        data[size] = '\0';
-        if (sizep != NULL) *sizep = size;
-      }
-    }
-    fclose(fp);
-  }
-  return data;
-}
-
-bool mg_file_write(const char *path, const void *buf, size_t len) {
-  bool result = false;
-  FILE *fp;
-  char tmp[MG_PATH_MAX];
-  snprintf(tmp, sizeof(tmp), "%s.%d", path, rand());
-  fp = fopen(tmp, "wb");
-  if (fp != NULL) {
-    result = fwrite(buf, 1, len, fp) == len;
-    fclose(fp);
-    if (result) {
-      remove(path);
-      rename(tmp, path);
-    } else {
-      remove(tmp);
-    }
-  }
-  return result;
-}
-
-bool mg_file_printf(const char *path, const char *fmt, ...) {
-  char tmp[256], *buf = tmp;
-  bool result;
-  int len;
-  va_list ap;
-  va_start(ap, fmt);
-  len = mg_vasprintf(&buf, sizeof(tmp), fmt, ap);
-  va_end(ap);
-  result = mg_file_write(path, buf, len > 0 ? (size_t) len : 0);
-  if (buf != tmp) free(buf);
-  return result;
-}
+#if MG_ARCH == MG_ARCH_UNIX && defined(__APPLE__)
+#include <mach/mach_time.h>
+#endif
 
 #if MG_ENABLE_CUSTOM_RANDOM
 #else
@@ -64,59 +11,19 @@ void mg_random(void *buf, size_t len) {
   unsigned char *p = (unsigned char *) buf;
 #if MG_ARCH == MG_ARCH_ESP32
   while (len--) *p++ = (unsigned char) (esp_random() & 255);
+  done = true;
 #elif MG_ARCH == MG_ARCH_WIN32
-#elif MG_ARCH_UNIX
+#elif MG_ARCH == MG_ARCH_UNIX
   FILE *fp = fopen("/dev/urandom", "rb");
   if (fp != NULL) {
     if (fread(buf, 1, len, fp) == len) done = true;
     fclose(fp);
   }
 #endif
-  // Fallback to a pseudo random gen
-  if (!done) {
-    while (len--) *p++ = (unsigned char) (rand() & 255);
-  }
+  // If everything above did not work, fallback to a pseudo random generator
+  while (!done && len--) *p++ = (unsigned char) (rand() & 255);
 }
 #endif
-
-bool mg_globmatch(const char *s1, size_t n1, const char *s2, size_t n2) {
-  size_t i = 0, j = 0, ni = 0, nj = 0;
-  while (i < n1 || j < n2) {
-    if (i < n1 && j < n2 && (s1[i] == '?' || s2[j] == s1[i])) {
-      i++, j++;
-    } else if (i < n1 && (s1[i] == '*' || s1[i] == '#')) {
-      ni = i, nj = j + 1, i++;
-    } else if (nj > 0 && nj <= n2 && (s1[ni] == '#' || s2[j] != '/')) {
-      i = ni, j = nj;
-    } else {
-      // printf(">>: [%s] [%s] %d %d %d %d\n", s1, s2, i, j, ni, nj);
-      return false;
-    }
-  }
-  return true;
-}
-
-static size_t mg_nce(const char *s, size_t n, size_t ofs, size_t *koff,
-                     size_t *klen, size_t *voff, size_t *vlen) {
-  size_t kvlen, kl;
-  for (kvlen = 0; ofs + kvlen < n && s[ofs + kvlen] != ',';) kvlen++;
-  for (kl = 0; kl < kvlen && s[ofs + kl] != '=';) kl++;
-  if (koff != NULL) *koff = ofs;
-  if (klen != NULL) *klen = kl;
-  if (voff != NULL) *voff = kl < kvlen ? ofs + kl + 1 : 0;
-  if (vlen != NULL) *vlen = kl < kvlen ? kvlen - kl - 1 : 0;
-  ofs += kvlen + 1;
-  return ofs > n ? n : ofs;
-}
-
-bool mg_commalist(struct mg_str *s, struct mg_str *k, struct mg_str *v) {
-  size_t koff = 0, klen = 0, voff = 0, vlen = 0;
-  size_t off = mg_nce(s->ptr, s->len, 0, &koff, &klen, &voff, &vlen);
-  if (k != NULL) *k = mg_str_n(s->ptr + koff, klen);
-  if (v != NULL) *v = mg_str_n(s->ptr + voff, vlen);
-  *s = mg_str_n(s->ptr + off, s->len - off);
-  return off > 0;
-}
 
 uint32_t mg_ntohl(uint32_t net) {
   uint8_t data[4] = {0, 0, 0, 0};
@@ -291,51 +198,12 @@ int mg_check_ip_acl(struct mg_str acl, uint32_t remote_ip) {
     uint32_t net, mask;
     if (k.ptr[0] != '+' && k.ptr[0] != '-') return -1;
     if (parse_net(&k.ptr[1], &net, &mask) == 0) return -2;
-    if ((remote_ip & mask) == net) allowed = k.ptr[0];
+    if ((mg_ntohl(remote_ip) & mask) == net) allowed = k.ptr[0];
   }
   return allowed == '+';
 }
 
-double mg_time(void) {
-#if MG_ARCH == MG_ARCH_WIN32
-  SYSTEMTIME sysnow;
-  FILETIME ftime;
-  GetLocalTime(&sysnow);
-  SystemTimeToFileTime(&sysnow, &ftime);
-  /*
-   * 1. VC 6.0 doesn't support conversion uint64 -> double, so, using int64
-   * This should not cause a problems in this (21th) century
-   * 2. Windows FILETIME is a number of 100-nanosecond intervals since January
-   * 1, 1601 while time_t is a number of _seconds_ since January 1, 1970 UTC,
-   * thus, we need to convert to seconds and adjust amount (subtract 11644473600
-   * seconds)
-   */
-  return (double) (((int64_t) ftime.dwLowDateTime +
-                    ((int64_t) ftime.dwHighDateTime << 32)) /
-                   10000000.0) -
-         11644473600;
-#elif MG_ARCH == MG_ARCH_FREERTOS_TCP
-  return mg_millis() / 1000.0;
-#else
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL /* tz */) != 0) return 0;
-  return (double) tv.tv_sec + (((double) tv.tv_usec) / 1000000.0);
-#endif /* _WIN32 */
-}
-
-void mg_usleep(unsigned long usecs) {
-#if MG_ARCH == MG_ARCH_WIN32
-  Sleep(usecs / 1000);
-#elif MG_ARCH == MG_ARCH_ESP8266
-  ets_delay_us(usecs);
-#elif MG_ARCH == MG_ARCH_FREERTOS_TCP || MG_ARCH == MG_ARCH_FREERTOS_LWIP
-  vTaskDelay(pdMS_TO_TICKS(usecs / 1000));
-#else
-  usleep((useconds_t) usecs);
-#endif
-}
-
-unsigned long mg_millis(void) {
+int64_t mg_millis(void) {
 #if MG_ARCH == MG_ARCH_WIN32
   return GetTickCount();
 #elif MG_ARCH == MG_ARCH_ESP32
@@ -344,10 +212,28 @@ unsigned long mg_millis(void) {
   return xTaskGetTickCount() * portTICK_PERIOD_MS;
 #elif MG_ARCH == MG_ARCH_FREERTOS_TCP || MG_ARCH == MG_ARCH_FREERTOS_LWIP
   return xTaskGetTickCount() * portTICK_PERIOD_MS;
-#else
+#elif MG_ARCH == MG_ARCH_AZURERTOS
+  return tx_time_get() * (1000 /* MS per SEC */ / TX_TIMER_TICKS_PER_SECOND);
+#elif MG_ARCH == MG_ARCH_UNIX && defined(__APPLE__)
+  uint64_t ticks = mach_absolute_time();
+  static mach_timebase_info_data_t timebase;
+  mach_timebase_info(&timebase);
+  double ticks_to_nanos = (double) timebase.numer / timebase.denom;
+  uint64_t uptime_nanos = (uint64_t) (ticks_to_nanos * ticks);
+  return (int64_t) (uptime_nanos / 1000000);
+#elif MG_ARCH == MG_ARCH_UNIX
   struct timespec ts;
+#ifdef _POSIX_MONOTONIC_CLOCK
+#ifdef CLOCK_MONOTONIC_RAW
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+#else
   clock_gettime(CLOCK_REALTIME, &ts);
-  return (unsigned long) ((uint64_t) ts.tv_sec * 1000 +
-                          (uint64_t) ts.tv_nsec / 1000000);
+#endif
+  return ((int64_t) ts.tv_sec * 1000 + (int64_t) ts.tv_nsec / 1000000);
+#else
+  return time(NULL) * 1000;
 #endif
 }

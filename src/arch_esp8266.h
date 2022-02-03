@@ -21,7 +21,7 @@
 
 #include <esp_system.h>
 
-#define MG_DIRSEP '/'
-#define MG_INT64_FMT "%lld"
+#define MG_PATH_MAX 128
+#define MG_ENABLE_DIRLIST 1
 
 #endif

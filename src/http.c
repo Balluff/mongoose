@@ -3,7 +3,6 @@
 #include "base64.h"
 #include "log.h"
 #include "net.h"
-#include "private.h"
 #include "ssi.h"
 #include "util.h"
 #include "version.h"
@@ -172,8 +171,8 @@ struct mg_str *mg_http_get_header(struct mg_http_message *h, const char *name) {
   return NULL;
 }
 
-void mg_http_parse_headers(const char *s, const char *end,
-                           struct mg_http_header *h, int max_headers) {
+static void mg_http_parse_headers(const char *s, const char *end,
+                                  struct mg_http_header *h, int max_headers) {
   int i;
   for (i = 0; i < max_headers; i++) {
     struct mg_str k, v, tmp;
@@ -366,42 +365,16 @@ void mg_http_reply(struct mg_connection *c, int code, const char *headers,
 
 static void http_cb(struct mg_connection *, int, void *, void *);
 static void restore_http_cb(struct mg_connection *c) {
-  struct mg_fd *fd = (struct mg_fd *) c->pfn_data;
-  if (fd != NULL) fd->fs->close(fd);
+  mg_fs_close((struct mg_fd *) c->pfn_data);
   c->pfn_data = NULL;
   c->pfn = http_cb;
 }
 
+char *mg_http_etag(char *buf, size_t len, size_t size, time_t mtime);
 char *mg_http_etag(char *buf, size_t len, size_t size, time_t mtime) {
   snprintf(buf, len, "\"%lx." MG_INT64_FMT "\"", (unsigned long) mtime,
            (int64_t) size);
   return buf;
-}
-
-int mg_http_upload(struct mg_connection *c, struct mg_http_message *hm,
-                   const char *dir) {
-  char offset[40] = "", name[200] = "", path[256];
-  mg_http_get_var(&hm->query, "offset", offset, sizeof(offset));
-  mg_http_get_var(&hm->query, "name", name, sizeof(name));
-  if (name[0] == '\0') {
-    mg_http_reply(c, 400, "", "%s", "name required");
-    return -1;
-  } else {
-    FILE *fp;
-    size_t oft = strtoul(offset, NULL, 0);
-    snprintf(path, sizeof(path), "%s%c%s", dir, MG_DIRSEP, name);
-    LOG(LL_DEBUG,
-        ("%p %d bytes @ %d [%s]", c->fd, (int) hm->body.len, (int) oft, name));
-    if ((fp = fopen(path, oft == 0 ? "wb" : "ab")) == NULL) {
-      mg_http_reply(c, 400, "", "fopen(%s): %d", name, errno);
-      return -2;
-    } else {
-      fwrite(hm->body.ptr, 1, hm->body.len, fp);
-      fclose(fp);
-      mg_http_reply(c, 200, "", "");
-      return (int) hm->body.len;
-    }
-  }
 }
 
 static void static_cb(struct mg_connection *c, int ev, void *ev_data,
@@ -423,65 +396,44 @@ static void static_cb(struct mg_connection *c, int ev, void *ev_data,
 }
 
 static struct mg_str guess_content_type(struct mg_str path, const char *extra) {
-  // clang-format off
-  struct mimeentry { struct mg_str extension, value; };
-  #define MIME_ENTRY(a, b) {{a, sizeof(a) - 1 }, { b, sizeof(b) - 1 }}
-  // clang-format on
-  const struct mimeentry tab[] = {
-      MIME_ENTRY("html", "text/html; charset=utf-8"),
-      MIME_ENTRY("htm", "text/html; charset=utf-8"),
-      MIME_ENTRY("css", "text/css; charset=utf-8"),
-      MIME_ENTRY("js", "text/javascript; charset=utf-8"),
-      MIME_ENTRY("gif", "image/gif"),
-      MIME_ENTRY("png", "image/png"),
-      MIME_ENTRY("woff", "font/woff"),
-      MIME_ENTRY("ttf", "font/ttf"),
-      MIME_ENTRY("aac", "audio/aac"),
-      MIME_ENTRY("avi", "video/x-msvideo"),
-      MIME_ENTRY("azw", "application/vnd.amazon.ebook"),
-      MIME_ENTRY("bin", "application/octet-stream"),
-      MIME_ENTRY("bmp", "image/bmp"),
-      MIME_ENTRY("bz", "application/x-bzip"),
-      MIME_ENTRY("bz2", "application/x-bzip2"),
-      MIME_ENTRY("csv", "text/csv"),
-      MIME_ENTRY("doc", "application/msword"),
-      MIME_ENTRY("epub", "application/epub+zip"),
-      MIME_ENTRY("exe", "application/octet-stream"),
-      MIME_ENTRY("gz", "application/gzip"),
-      MIME_ENTRY("ico", "image/x-icon"),
-      MIME_ENTRY("json", "application/json"),
-      MIME_ENTRY("mid", "audio/mid"),
-      MIME_ENTRY("mjs", "text/javascript"),
-      MIME_ENTRY("mov", "video/quicktime"),
-      MIME_ENTRY("mp3", "audio/mpeg"),
-      MIME_ENTRY("mp4", "video/mp4"),
-      MIME_ENTRY("mpeg", "video/mpeg"),
-      MIME_ENTRY("mpg", "video/mpeg"),
-      MIME_ENTRY("ogg", "application/ogg"),
-      MIME_ENTRY("pdf", "application/pdf"),
-      MIME_ENTRY("rar", "application/rar"),
-      MIME_ENTRY("rtf", "application/rtf"),
-      MIME_ENTRY("shtml", "text/html; charset=utf-8"),
-      MIME_ENTRY("svg", "image/svg+xml"),
-      MIME_ENTRY("tar", "application/tar"),
-      MIME_ENTRY("tgz", "application/tar-gz"),
-      MIME_ENTRY("txt", "text/plain; charset=utf-8"),
-      MIME_ENTRY("wasm", "application/wasm"),
-      MIME_ENTRY("wav", "audio/wav"),
-      MIME_ENTRY("weba", "audio/webm"),
-      MIME_ENTRY("webm", "video/webm"),
-      MIME_ENTRY("webp", "image/webp"),
-      MIME_ENTRY("xls", "application/excel"),
-      MIME_ENTRY("xml", "application/xml"),
-      MIME_ENTRY("xsl", "application/xml"),
-      MIME_ENTRY("zip", "application/zip"),
-      MIME_ENTRY("3gp", "video/3gpp"),
-      MIME_ENTRY("7z", "application/x-7z-compressed"),
-      MIME_ENTRY("7z", "application/x-7z-compressed"),
-      {{0, 0}, {0, 0}},
-  };
-  size_t i = 0;
   struct mg_str k, v, s = mg_str(extra);
+  size_t i = 0;
+
+  // clang-format off
+  struct mg_str tab[] = {
+      MG_C_STR("html"), MG_C_STR("text/html; charset=utf-8"),
+      MG_C_STR("htm"), MG_C_STR("text/html; charset=utf-8"),
+      MG_C_STR("css"), MG_C_STR("text/css; charset=utf-8"),
+      MG_C_STR("js"), MG_C_STR("text/javascript; charset=utf-8"),
+      MG_C_STR("gif"), MG_C_STR("image/gif"),
+      MG_C_STR("png"), MG_C_STR("image/png"),
+      MG_C_STR("jpg"), MG_C_STR("image/jpeg"),
+      MG_C_STR("jpeg"), MG_C_STR("image/jpeg"),
+      MG_C_STR("woff"), MG_C_STR("font/woff"),
+      MG_C_STR("ttf"), MG_C_STR("font/ttf"),
+      MG_C_STR("svg"), MG_C_STR("image/svg+xml"),
+      MG_C_STR("txt"), MG_C_STR("text/plain; charset=utf-8"),
+      MG_C_STR("avi"), MG_C_STR("video/x-msvideo"),
+      MG_C_STR("csv"), MG_C_STR("text/csv"),
+      MG_C_STR("doc"), MG_C_STR("application/msword"),
+      MG_C_STR("exe"), MG_C_STR("application/octet-stream"),
+      MG_C_STR("gz"), MG_C_STR("application/gzip"),
+      MG_C_STR("ico"), MG_C_STR("image/x-icon"),
+      MG_C_STR("json"), MG_C_STR("application/json"),
+      MG_C_STR("mov"), MG_C_STR("video/quicktime"),
+      MG_C_STR("mp3"), MG_C_STR("audio/mpeg"),
+      MG_C_STR("mp4"), MG_C_STR("video/mp4"),
+      MG_C_STR("mpeg"), MG_C_STR("video/mpeg"),
+      MG_C_STR("pdf"), MG_C_STR("application/pdf"),
+      MG_C_STR("shtml"), MG_C_STR("text/html; charset=utf-8"),
+      MG_C_STR("tgz"), MG_C_STR("application/tar-gz"),
+      MG_C_STR("wav"), MG_C_STR("audio/wav"),
+      MG_C_STR("webp"), MG_C_STR("image/webp"),
+      MG_C_STR("zip"), MG_C_STR("application/zip"),
+      MG_C_STR("3gp"), MG_C_STR("video/3gpp"),
+      {0, 0},
+  };
+  // clang-format on
 
   // Shrink path to its extension only
   while (i < path.len && path.ptr[path.len - i - 1] != '.') i++;
@@ -494,8 +446,8 @@ static struct mg_str guess_content_type(struct mg_str path, const char *extra) {
   }
 
   // Process built-in mime types
-  for (i = 0; tab[i].extension.ptr != NULL; i++) {
-    if (mg_strcmp(path, tab[i].extension) == 0) return tab[i].value;
+  for (i = 0; tab[i].ptr != NULL; i += 2) {
+    if (mg_strcmp(path, tab[i]) == 0) return tab[i + 1];
   }
 
   return mg_str("text/plain; charset=utf-8");
@@ -525,7 +477,7 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
                         const char *path, struct mg_http_serve_opts *opts) {
   char etag[64];
   struct mg_fs *fs = opts->fs == NULL ? &mg_fs_posix : opts->fs;
-  struct mg_fd *fd = fs->open(path, MG_FS_READ);
+  struct mg_fd *fd = mg_fs_open(fs, path, MG_FS_READ);
   size_t size = 0;
   time_t mtime = 0;
   struct mg_str *inm = NULL;
@@ -533,12 +485,12 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
   if (fd == NULL || fs->stat(path, &size, &mtime) == 0) {
     LOG(LL_DEBUG, ("404 [%s] %p", path, (void *) fd));
     mg_http_reply(c, 404, "", "%s", "Not found\n");
-    fs->close(fd);
+    mg_fs_close(fd);
     // NOTE: mg_http_etag() call should go first!
   } else if (mg_http_etag(etag, sizeof(etag), size, mtime) != NULL &&
              (inm = mg_http_get_header(hm, "If-None-Match")) != NULL &&
              mg_vcasecmp(inm, etag) == 0) {
-    fs->close(fd);
+    mg_fs_close(fd);
     mg_printf(c, "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\n\r\n");
   } else {
     int n, status = 200;
@@ -574,7 +526,7 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
               etag, cl, range, opts->extra_headers ? opts->extra_headers : "");
     if (mg_vcasecmp(&hm->method, "HEAD") == 0) {
       c->is_draining = 1;
-      fs->close(fd);
+      mg_fs_close(fd);
     } else {
       c->pfn = static_cb;
       c->pfn_data = fd;
@@ -593,18 +545,18 @@ static void printdirentry(const char *name, void *userdata) {
   struct printdirentrydata *d = (struct printdirentrydata *) userdata;
   struct mg_fs *fs = d->opts->fs == NULL ? &mg_fs_posix : d->opts->fs;
   size_t size = 0;
-  time_t mtime = 0;
+  time_t t = 0;
   char path[MG_PATH_MAX], sz[64], mod[64];
   int flags, n = 0;
 
   // LOG(LL_DEBUG, ("[%s] [%s]", d->dir, name));
   if (snprintf(path, sizeof(path), "%s%c%s", d->dir, '/', name) < 0) {
     LOG(LL_ERROR, ("%s truncated", name));
-  } else if ((flags = fs->stat(path, &size, &mtime)) == 0) {
+  } else if ((flags = fs->stat(path, &size, &t)) == 0) {
     LOG(LL_ERROR, ("%lu stat(%s): %d", d->c->id, path, errno));
   } else {
     const char *slash = flags & MG_FS_DIR ? "/" : "";
-    struct tm t;
+    struct tm tm;
     if (flags & MG_FS_DIR) {
       snprintf(sz, sizeof(sz), "%s", "[DIR]");
     } else if (size < 1024) {
@@ -616,12 +568,13 @@ static void printdirentry(const char *name, void *userdata) {
     } else {
       snprintf(sz, sizeof(sz), "%.1fG", (double) size / 1073741824);
     }
-    strftime(mod, sizeof(mod), "%d-%b-%Y %H:%M", localtime_r(&mtime, &t));
+    strftime(mod, sizeof(mod), "%d-%b-%Y %H:%M", localtime_r(&t, &tm));
     n = (int) mg_url_encode(name, strlen(name), path, sizeof(path));
     mg_printf(d->c,
               "  <tr><td><a href=\"%.*s%s\">%s%s</a></td>"
-              "<td>%s</td><td>%s</td></tr>\n",
-              n, path, slash, name, slash, mod, sz);
+              "<td name=%lu>%s</td><td name=" MG_INT64_FMT ">%s</td></tr>\n",
+              n, path, slash, name, slash, (unsigned long) t, mod,
+              flags & MG_FS_DIR ? (int64_t) -1 : (int64_t) size, sz);
   }
 }
 
@@ -652,8 +605,10 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
       "</script>";
   struct mg_fs *fs = opts->fs == NULL ? &mg_fs_posix : opts->fs;
   struct printdirentrydata d = {c, hm, opts, dir};
-  char tmp[10];
+  char tmp[10], buf[MG_PATH_MAX];
   size_t off, n;
+  int len = mg_url_decode(hm->uri.ptr, hm->uri.len, buf, sizeof(buf), 0);
+  struct mg_str uri = len > 0 ? mg_str_n(buf, (size_t) len) : hm->uri;
 
   mg_printf(c,
             "HTTP/1.1 200 OK\r\n"
@@ -673,8 +628,8 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
             "<tr><td colspan=\"3\"><hr></td></tr>"
             "</thead>"
             "<tbody id=\"tb\">\n",
-            (int) hm->uri.len, hm->uri.ptr, sort_js_code, sort_js_code2,
-            (int) hm->uri.len, hm->uri.ptr);
+            (int) uri.len, uri.ptr, sort_js_code, sort_js_code2, (int) uri.len,
+            uri.ptr);
 
   fs->list(dir, printdirentry, &d);
   mg_printf(c,
@@ -695,7 +650,8 @@ static void remove_double_dots(char *s) {
       while (s[0] != '\0') {
         if (s[0] == '/' || s[0] == '\\') {
           s++;
-        } else if (s[0] == '.' && s[1] == '.') {
+        } else if (s[0] == '.' && s[1] == '.' &&
+                   (s[2] == '/' || s[2] == '\\')) {
           s += 2;
         } else {
           break;
@@ -725,13 +681,23 @@ static int uri_to_path2(struct mg_connection *c, struct mg_http_message *hm,
     path[path_size - 1] = '\0';  // Double-check
     remove_double_dots(path);
     n = strlen(path);
-    LOG(LL_DEBUG, ("--> %s", path));
+    LOG(LL_VERBOSE_DEBUG,
+        ("%lu %.*s -> %s", c->id, (int) hm->uri.len, hm->uri.ptr, path));
     while (n > 0 && path[n - 1] == '/') path[--n] = 0;  // Trim trailing slashes
     flags = fs->stat(path, NULL, NULL);                 // Does it exist?
     if (flags == 0) {
       mg_http_reply(c, 404, "", "Not found\n");  // Does not exist, doh
+    } else if ((flags & MG_FS_DIR) && hm->uri.len > 0 &&
+               hm->uri.ptr[hm->uri.len - 1] != '/') {
+      mg_printf(c,
+                "HTTP/1.1 301 Moved\r\n"
+                "Location: %.*s/\r\n"
+                "Content-Length: 0\r\n"
+                "\r\n",
+                (int) hm->uri.len, hm->uri.ptr);
+      flags = 0;
     } else if (flags & MG_FS_DIR) {
-      if (((snprintf(path + n, path_size - n, "/index.html") > 0 &&
+      if (((snprintf(path + n, path_size - n, "/" MG_HTTP_INDEX) > 0 &&
             (tmp = fs->stat(path, NULL, NULL)) != 0) ||
            (snprintf(path + n, path_size - n, "/index.shtml") > 0 &&
             (tmp = fs->stat(path, NULL, NULL)) != 0))) {
@@ -764,7 +730,8 @@ void mg_http_serve_dir(struct mg_connection *c, struct mg_http_message *hm,
   const char *sp = opts->ssi_pattern;
   int flags = uri_to_path(c, hm, opts, path, sizeof(path));
   if (flags == 0) return;
-  LOG(LL_DEBUG, ("%.*s %s %d", (int) hm->uri.len, hm->uri.ptr, path, flags));
+  LOG(LL_VERBOSE_DEBUG,
+      ("%.*s %s %d", (int) hm->uri.len, hm->uri.ptr, path, flags));
   if (flags & MG_FS_DIR) {
     listdir(c, hm, opts, path);
   } else if (sp != NULL && mg_globmatch(sp, strlen(sp), path, strlen(path))) {
@@ -825,11 +792,13 @@ static struct mg_str stripquotes(struct mg_str s) {
 
 struct mg_str mg_http_get_header_var(struct mg_str s, struct mg_str v) {
   size_t i;
-  for (i = 0; i + v.len + 2 < s.len; i++) {
+  for (i = 0; v.len > 0 && i + v.len + 2 < s.len; i++) {
     if (s.ptr[i + v.len] == '=' && memcmp(&s.ptr[i], v.ptr, v.len) == 0) {
       const char *p = &s.ptr[i + v.len + 1], *b = p, *x = &s.ptr[s.len];
       int q = p < x && *p == '"' ? 1 : 0;
-      while (p < x && (q ? p == b || *p != '"' : *p != ';' && *p != ' ')) p++;
+      while (p < x &&
+             (q ? p == b || *p != '"' : *p != ';' && *p != ' ' && *p != ','))
+        p++;
       // LOG(LL_INFO, ("[%.*s] [%.*s] [%.*s]", (int) s.len, s.ptr, (int) v.len,
       // v.ptr, (int) (p - b), b));
       return stripquotes(mg_str_n(b, (size_t) (p - b + q)));
@@ -839,7 +808,7 @@ struct mg_str mg_http_get_header_var(struct mg_str s, struct mg_str v) {
 }
 
 bool mg_http_match_uri(const struct mg_http_message *hm, const char *glob) {
-  return mg_globmatch(glob, strlen(glob), hm->uri.ptr, hm->uri.len);
+  return mg_match(hm->uri, mg_str(glob), NULL);
 }
 
 static size_t get_chunk_length(const char *buf, size_t len, size_t *ll) {
@@ -917,10 +886,37 @@ void mg_http_delete_chunk(struct mg_connection *c, struct mg_http_message *hm) {
   c->recv.len -= ch.len;
 }
 
+int mg_http_upload(struct mg_connection *c, struct mg_http_message *hm,
+                   struct mg_fs *fs, const char *dir) {
+  char offset[40] = "", name[200] = "", path[256];
+  mg_http_get_var(&hm->query, "offset", offset, sizeof(offset));
+  mg_http_get_var(&hm->query, "name", name, sizeof(name));
+  if (name[0] == '\0') {
+    mg_http_reply(c, 400, "", "%s", "name required");
+    return -1;
+  } else {
+    struct mg_fd *fd;
+    long oft = strtol(offset, NULL, 0);
+    snprintf(path, sizeof(path), "%s%c%s", dir, MG_DIRSEP, name);
+    remove_double_dots(path);
+    LOG(LL_DEBUG, ("%d bytes @ %ld [%s]", (int) hm->body.len, oft, path));
+    if (oft == 0) fs->remove(path);
+    if ((fd = mg_fs_open(fs, path, MG_FS_WRITE)) == NULL) {
+      mg_http_reply(c, 400, "", "open(%s): %d", path, errno);
+      return -2;
+    } else {
+      int written = (int) fs->write(fd->fd, hm->body.ptr, hm->body.len);
+      mg_fs_close(fd);
+      mg_http_reply(c, 200, "", "%d", written);
+      return (int) hm->body.len;
+    }
+  }
+}
+
 static void http_cb(struct mg_connection *c, int ev, void *evd, void *fnd) {
   if (ev == MG_EV_READ || ev == MG_EV_CLOSE) {
     struct mg_http_message hm;
-    for (;;) {
+    while (c->recv.buf != NULL && c->recv.len > 0) {
       int n = mg_http_parse((char *) c->recv.buf, c->recv.len, &hm);
       bool is_chunked = n > 0 && mg_is_chunked(&hm);
       if (ev == MG_EV_CLOSE) {

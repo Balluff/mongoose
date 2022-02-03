@@ -2,7 +2,6 @@
 #include "event.h"
 #include "log.h"
 #include "net.h"
-#include "private.h"
 #include "str.h"
 #include "timer.h"
 #include "tls.h"
@@ -100,14 +99,79 @@ static struct mg_connection *alloc_conn(struct mg_mgr *mgr, bool is_client,
   return c;
 }
 
+static void iolog(struct mg_connection *c, char *buf, long n, bool r) {
+  int log_level = n > 0 ? LL_VERBOSE_DEBUG : LL_DEBUG;
+  char flags[] = {(char) ('0' + c->is_listening),
+                  (char) ('0' + c->is_client),
+                  (char) ('0' + c->is_accepted),
+                  (char) ('0' + c->is_resolving),
+                  (char) ('0' + c->is_connecting),
+                  (char) ('0' + c->is_tls),
+                  (char) ('0' + c->is_tls_hs),
+                  (char) ('0' + c->is_udp),
+                  (char) ('0' + c->is_websocket),
+                  (char) ('0' + c->is_hexdumping),
+                  (char) ('0' + c->is_draining),
+                  (char) ('0' + c->is_closing),
+                  (char) ('0' + c->is_readable),
+                  (char) ('0' + c->is_writable),
+                  '\0'};
+  LOG(log_level,
+      ("%-3lu %s %d:%d %ld err %d (%s)", c->id, flags, (int) c->send.len,
+       (int) c->recv.len, n, MG_SOCK_ERRNO, strerror(errno)));
+  if (n == 0) {
+    // Do nothing
+  } else if (n < 0) {
+    c->is_closing = 1;  // Error, or normal termination
+  } else if (n > 0) {
+    if (c->is_hexdumping) {
+      union usa usa;
+      char t1[50] = "", t2[50] = "";
+      socklen_t slen = sizeof(usa.sin);
+      char *s = mg_hexdump(buf, (size_t) n);
+      struct mg_addr a;
+      memset(&usa, 0, sizeof(usa));
+      memset(&a, 0, sizeof(a));
+      getsockname(FD(c), &usa.sa, &slen);
+      tomgaddr(&usa, &a, c->peer.is_ip6);
+      LOG(LL_INFO, ("\n-- %lu %s %s %s %s %ld\n%s", c->id,
+                    mg_straddr(&a, t1, sizeof(t1)), r ? "<-" : "->",
+                    mg_straddr(&c->peer, t2, sizeof(t2)), c->label, n, s));
+      free(s);
+      (void) t1, (void) t2;  // Silence warnings for MG_ENABLE_LOG=0
+    }
+    if (r) {
+      struct mg_str evd = mg_str_n(buf, (size_t) n);
+      c->recv.len += (size_t) n;
+      mg_call(c, MG_EV_READ, &evd);
+    } else {
+      mg_iobuf_del(&c->send, 0, (size_t) n);
+      if (c->send.len == 0) mg_iobuf_resize(&c->send, 0);
+      mg_call(c, MG_EV_WRITE, &n);
+    }
+  }
+}
+
 static long mg_sock_send(struct mg_connection *c, const void *buf, size_t len) {
-  long n = send(FD(c), (char *) buf, len, MSG_NONBLOCKING);
+  long n;
+  if (c->is_udp) {
+    union usa usa;
+    socklen_t slen = tousa(&c->peer, &usa);
+    n = sendto(FD(c), (char *) buf, len, 0, &usa.sa, slen);
+  } else {
+    n = send(FD(c), (char *) buf, len, MSG_NONBLOCKING);
+  }
   return n == 0 ? -1 : n < 0 && mg_sock_would_block() ? 0 : n;
 }
 
 bool mg_send(struct mg_connection *c, const void *buf, size_t len) {
-  return c->is_udp ? mg_sock_send(c, buf, len) > 0
-                   : mg_iobuf_add(&c->send, c->send.len, buf, len, MG_IO_SIZE);
+  if (c->is_udp) {
+    long n = mg_sock_send(c, buf, len);
+    iolog(c, (char *) buf, n, false);
+    return n > 0;
+  } else {
+    return mg_iobuf_add(&c->send, c->send.len, buf, len, MG_IO_SIZE);
+  }
 }
 
 static void mg_set_non_blocking_mode(SOCKET fd) {
@@ -120,13 +184,17 @@ static void mg_set_non_blocking_mode(SOCKET fd) {
   setsockopt(fd, 0, FREERTOS_SO_SNDTIMEO, &off, sizeof(off));
 #elif MG_ARCH == MG_ARCH_FREERTOS_LWIP
   lwip_fcntl(fd, F_SETFL, O_NONBLOCK);
+#elif MG_ARCH == MG_ARCH_AZURERTOS
+  fcntl(fd, F_SETFL, O_NONBLOCK);
 #else
-  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK, FD_CLOEXEC);
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);  // Non-blocking mode
+  fcntl(fd, F_SETFD, FD_CLOEXEC);                          // Set close-on-exec
 #endif
 }
 
-SOCKET mg_open_listener(const char *url, struct mg_addr *addr) {
+static SOCKET mg_open_listener(const char *url, struct mg_addr *addr) {
   SOCKET fd = INVALID_SOCKET;
+  int s_err = 0;  // Memoized socket error, in case closesocket() overrides it
   memset(addr, 0, sizeof(*addr));
   addr->port = mg_htons(mg_url_port(url));
   if (!mg_aton(mg_url_host(url), addr)) {
@@ -164,7 +232,7 @@ SOCKET mg_open_listener(const char *url, struct mg_addr *addr) {
 #endif
         bind(fd, &usa.sa, slen) == 0 &&
         // NOTE(lsm): FreeRTOS uses backlog value as a connection limit
-        (type == SOCK_DGRAM || listen(fd, 128) == 0)) {
+        (type == SOCK_DGRAM || listen(fd, MG_SOCK_LISTEN_BACKLOG_SIZE) == 0)) {
       // In case port was set to 0, get the real port number
       if (getsockname(fd, &usa.sa, &slen) == 0) {
         addr->port = usa.sin.sin_port;
@@ -174,12 +242,14 @@ SOCKET mg_open_listener(const char *url, struct mg_addr *addr) {
       }
       mg_set_non_blocking_mode(fd);
     } else if (fd != INVALID_SOCKET) {
+      s_err = MG_SOCK_ERRNO;
       closesocket(fd);
       fd = INVALID_SOCKET;
     }
   }
   if (fd == INVALID_SOCKET) {
-    LOG(LL_ERROR, ("Failed to listen on %s, errno %d", url, MG_SOCK_ERRNO));
+    if (s_err == 0) s_err = MG_SOCK_ERRNO;
+    LOG(LL_ERROR, ("Failed to listen on %s, errno %d", url, s_err));
   }
 
   return fd;
@@ -200,7 +270,8 @@ static long mg_sock_recv(struct mg_connection *c, void *buf, size_t len) {
 
 // NOTE(lsm): do only one iteration of reads, cause some systems
 // (e.g. FreeRTOS stack) return 0 instead of -1/EWOULDBLOCK when no data
-static void read_conn(struct mg_connection *c) {
+static long read_conn(struct mg_connection *c) {
+  long n = -1;
   if (c->recv.len >= MG_MAX_RECV_BUF_SIZE) {
     mg_error(c, "max_recv_buf_size reached");
   } else if (c->recv.size - c->recv.len < MG_IO_SIZE &&
@@ -209,58 +280,17 @@ static void read_conn(struct mg_connection *c) {
   } else {
     char *buf = (char *) &c->recv.buf[c->recv.len];
     size_t len = c->recv.size - c->recv.len;
-    long n = c->is_tls ? mg_tls_recv(c, buf, len) : mg_sock_recv(c, buf, len);
-    LOG(n > 0 ? LL_VERBOSE_DEBUG : LL_DEBUG,
-        ("%-3lu %d%d%d%d%d%d%d%d%d%d%d%d%d%d %7ld %ld/%ld err %d", c->id,
-         c->is_listening, c->is_client, c->is_accepted, c->is_resolving,
-         c->is_connecting, c->is_tls, c->is_tls_hs, c->is_udp, c->is_websocket,
-         c->is_hexdumping, c->is_draining, c->is_closing, c->is_readable,
-         c->is_writable, (long) c->recv.len, n, (long) len, MG_SOCK_ERRNO));
-    if (n == 0) {
-      // Do nothing
-    } else if (n < 0) {
-      c->is_closing = 1;  // Error, or normal termination
-    } else if (n > 0) {
-      struct mg_str evd = mg_str_n(buf, (size_t) n);
-      if (c->is_hexdumping) {
-        char *s = mg_hexdump(buf, (size_t) n);
-        LOG(LL_INFO, ("\n-- %lu %s %s %ld\n%s", c->id, c->label, "<-", n, s));
-        free(s);
-      }
-      c->recv.len += (size_t) n;
-      mg_call(c, MG_EV_READ, &evd);
-    }
+    n = c->is_tls ? mg_tls_recv(c, buf, len) : mg_sock_recv(c, buf, len);
+    iolog(c, buf, n, true);
   }
+  return n;
 }
 
 static void write_conn(struct mg_connection *c) {
   char *buf = (char *) c->send.buf;
   size_t len = c->send.len;
   long n = c->is_tls ? mg_tls_send(c, buf, len) : mg_sock_send(c, buf, len);
-
-  LOG(n > 0 ? LL_VERBOSE_DEBUG : LL_DEBUG,
-      ("%-3lu %d%d%d%d%d%d%d%d%d%d%d%d%d%d %7ld %ld err %d", c->id,
-       c->is_listening, c->is_client, c->is_accepted, c->is_resolving,
-       c->is_connecting, c->is_tls, c->is_tls_hs, c->is_udp, c->is_websocket,
-       c->is_hexdumping, c->is_draining, c->is_closing, c->is_readable,
-       c->is_writable, (long) c->send.len, n, MG_SOCK_ERRNO));
-
-  if (n == 0) {
-    // Do nothing
-  } else if (n < 0) {
-    c->is_closing = 1;  // Error, or normal termination
-  } else if (n > 0) {
-    // Hexdump before deleting
-    if (c->is_hexdumping) {
-      char *s = mg_hexdump(buf, (size_t) n);
-      LOG(LL_INFO, ("\n-- %lu %s %s %ld\n%s", c->id, c->label, "<-", n, s));
-      free(s);
-    }
-    mg_iobuf_del(&c->send, 0, (size_t) n);
-    if (c->send.len == 0) mg_iobuf_resize(&c->send, 0);
-    mg_call(c, MG_EV_WRITE, &n);
-    // if (c->send.len == 0) mg_iobuf_resize(&c->send, 0);
-  }
+  iolog(c, buf, n, false);
 }
 
 static void close_conn(struct mg_connection *c) {
@@ -287,7 +317,7 @@ static void close_conn(struct mg_connection *c) {
 }
 
 static void setsockopts(struct mg_connection *c) {
-#if MG_ARCH == MG_ARCH_FREERTOS_TCP
+#if MG_ARCH == MG_ARCH_FREERTOS_TCP || MG_ARCH == MG_ARCH_AZURERTOS
   (void) c;
 #else
   int on = 1;
@@ -299,7 +329,8 @@ static void setsockopts(struct mg_connection *c) {
   setsockopt(FD(c), SOL_TCP, TCP_QUICKACK, (char *) &on, sizeof(on));
 #endif
   setsockopt(FD(c), SOL_SOCKET, SO_KEEPALIVE, (char *) &on, sizeof(on));
-#if ESP32 || ESP8266 || defined(__linux__)
+#if (defined(ESP32) && ESP32) || (defined(ESP8266) && ESP8266) || \
+    defined(__linux__)
   int idle = 60;
   setsockopt(FD(c), IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
 #endif
@@ -314,18 +345,21 @@ static void setsockopts(struct mg_connection *c) {
 }
 
 void mg_connect_resolved(struct mg_connection *c) {
-  char buf[40];
+  // char buf[40];
   int type = c->is_udp ? SOCK_DGRAM : SOCK_STREAM;
   int rc, af = c->peer.is_ip6 ? AF_INET6 : AF_INET;
-  mg_straddr(c, buf, sizeof(buf));
+  // mg_straddr(&c->peer, buf, sizeof(buf));
   c->fd = S2PTR(socket(af, type, 0));
   if (FD(c) == INVALID_SOCKET) {
     mg_error(c, "socket(): %d", MG_SOCK_ERRNO);
+  } else if (c->is_udp) {
+    mg_call(c, MG_EV_RESOLVE, NULL);
+    mg_call(c, MG_EV_CONNECT, NULL);
   } else {
     union usa usa;
     socklen_t slen = tousa(&c->peer, &usa);
-    if (c->is_udp == 0) mg_set_non_blocking_mode(FD(c));
-    if (c->is_udp == 0) setsockopts(c);
+    mg_set_non_blocking_mode(FD(c));
+    setsockopts(c);
     mg_call(c, MG_EV_RESOLVE, NULL);
     if ((rc = connect(FD(c), &usa.sa, slen)) == 0) {
       mg_call(c, MG_EV_CONNECT, NULL);
@@ -340,17 +374,18 @@ void mg_connect_resolved(struct mg_connection *c) {
 struct mg_connection *mg_connect(struct mg_mgr *mgr, const char *url,
                                  mg_event_handler_t fn, void *fn_data) {
   struct mg_connection *c = NULL;
-  if ((c = alloc_conn(mgr, 1, INVALID_SOCKET)) == NULL) {
+  if (url == NULL || url[0] == '\0') {
+    LOG(LL_ERROR, ("null url"));
+  } else if ((c = alloc_conn(mgr, 1, INVALID_SOCKET)) == NULL) {
     LOG(LL_ERROR, ("OOM"));
   } else {
-    struct mg_str host = mg_url_host(url);
     LIST_ADD_HEAD(struct mg_connection, &mgr->conns, c);
     c->is_udp = (strncmp(url, "udp:", 4) == 0);
-    c->peer.port = mg_htons(mg_url_port(url));
     c->fn = fn;
     c->fn_data = fn_data;
     LOG(LL_DEBUG, ("%lu -> %s", c->id, url));
-    mg_resolve(c, &host, mgr->dnstimeout);
+    mg_call(c, MG_EV_OPEN, NULL);
+    mg_resolve(c, url);
   }
   return c;
 }
@@ -361,7 +396,13 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
   socklen_t sa_len = sizeof(usa);
   SOCKET fd = accept(FD(lsn), &usa.sa, &sa_len);
   if (fd == INVALID_SOCKET) {
-    LOG(LL_ERROR, ("%lu accept failed, errno %d", lsn->id, MG_SOCK_ERRNO));
+#if MG_ARCH == MG_ARCH_AZURERTOS
+    // AzureRTOS, in non-block socket mode can mark listening socket readable
+    // even it is not. See comment for 'select' func implementation in nx_bsd.c
+    // That's not an error, just should try later
+    if (MG_SOCK_ERRNO != EAGAIN)
+#endif
+      LOG(LL_ERROR, ("%lu accept failed, errno %d", lsn->id, MG_SOCK_ERRNO));
 #if (!defined(_WIN32) && (MG_ARCH != MG_ARCH_FREERTOS_TCP))
   } else if ((long) fd >= FD_SETSIZE) {
     LOG(LL_ERROR, ("%ld > %ld", (long) fd, (long) FD_SETSIZE));
@@ -373,7 +414,7 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
   } else {
     char buf[40];
     tomgaddr(&usa, &c->peer, sa_len != sizeof(usa.sin));
-    mg_straddr(c, buf, sizeof(buf));
+    mg_straddr(&c->peer, buf, sizeof(buf));
     LOG(LL_DEBUG, ("%lu accepted %s", c->id, buf));
     mg_set_non_blocking_mode(FD(c));
     setsockopts(c);
@@ -384,6 +425,7 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
     c->pfn_data = lsn->pfn_data;
     c->fn = lsn->fn;
     c->fn_data = lsn->fn_data;
+    mg_call(c, MG_EV_OPEN, NULL);
     mg_call(c, MG_EV_ACCEPT, NULL);
   }
 }
@@ -415,13 +457,17 @@ static bool mg_socketpair(SOCKET sp[2], union usa usa[2]) {
   return result;
 }
 
-void mg_mgr_wakeup(struct mg_connection *c) {
-  LOG(LL_INFO, ("skt: %p", c->pfn_data));
-  send((SOCKET) (size_t) c->pfn_data, "\x01", 1, MSG_NONBLOCKING);
+void mg_mgr_wakeup(struct mg_connection *c, const void *buf, size_t len) {
+  if (buf == NULL || len == 0) buf = (void *) "", len = 1;
+  send((SOCKET) (size_t) c->pfn_data, (const char *) buf, len, MSG_NONBLOCKING);
 }
 
 static void pf1(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
-  if (ev == MG_EV_READ) mg_iobuf_free(&c->recv);
+  if (ev == MG_EV_READ) {
+    mg_iobuf_free(&c->recv);
+  } else if (ev == MG_EV_CLOSE) {
+    closesocket((SOCKET) (size_t) c->pfn_data);
+  }
   (void) ev_data, (void) fn_data;
 }
 
@@ -444,6 +490,7 @@ struct mg_connection *mg_mkpipe(struct mg_mgr *mgr, mg_event_handler_t fn,
     c->pfn_data = (void *) (size_t) sp[0];
     c->fn = fn;
     c->fn_data = fn_data;
+    mg_call(c, MG_EV_OPEN, NULL);
     LIST_ADD_HEAD(struct mg_connection, &mgr->conns, c);
   }
   return c;
@@ -468,7 +515,8 @@ struct mg_connection *mg_listen(struct mg_mgr *mgr, const char *url,
     LIST_ADD_HEAD(struct mg_connection, &mgr->conns, c);
     c->fn = fn;
     c->fn_data = fn_data;
-    LOG(LL_INFO,
+    mg_call(c, MG_EV_OPEN, NULL);
+    LOG(LL_DEBUG,
         ("%lu accepting on %s (port %u)", c->id, url, mg_ntohs(c->peer.port)));
   }
   return c;
@@ -517,9 +565,7 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
 
   for (c = mgr->conns; c != NULL; c = c->next) {
     // TLS might have stuff buffered, so dig everything
-    c->is_readable = c->is_tls && c->is_readable
-                         ? 1
-                         : FD(c) != INVALID_SOCKET && FD_ISSET(FD(c), &rset);
+    c->is_readable = FD(c) != INVALID_SOCKET && FD_ISSET(FD(c), &rset);
     c->is_writable = FD(c) != INVALID_SOCKET && FD_ISSET(FD(c), &wset);
   }
 #endif
@@ -534,8 +580,9 @@ static void connect_conn(struct mg_connection *c) {
   if (rc == EAGAIN || rc == EWOULDBLOCK) rc = 0;
   c->is_connecting = 0;
   if (rc) {
-    char buf[40];
-    mg_error(c, "error connecting to %s", mg_straddr(c, buf, sizeof(buf)));
+    char buf[50];
+    mg_error(c, "error connecting to %s",
+             mg_straddr(&c->peer, buf, sizeof(buf)));
   } else {
     if (c->is_tls_hs) mg_tls_handshake(c);
     mg_call(c, MG_EV_CONNECT, NULL);
@@ -544,7 +591,7 @@ static void connect_conn(struct mg_connection *c) {
 
 void mg_mgr_poll(struct mg_mgr *mgr, int ms) {
   struct mg_connection *c, *tmp;
-  unsigned long now;
+  int64_t now;
 
   mg_iotest(mgr, ms);
   now = mg_millis();
@@ -569,6 +616,7 @@ void mg_mgr_poll(struct mg_mgr *mgr, int ms) {
     } else {
       if (c->is_readable) read_conn(c);
       if (c->is_writable) write_conn(c);
+      while (c->is_tls && read_conn(c) > 0) (void) 0;  // Read buffered TLS data
     }
 
     if (c->is_draining && c->send.len == 0) c->is_closing = 1;

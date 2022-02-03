@@ -15,6 +15,7 @@
 #endif
 
 #include <ctype.h>
+#include <direct.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -51,10 +52,11 @@ typedef enum { false = 0, true = 1 } bool;
 #ifndef __cplusplus
 #define snprintf _snprintf
 #define vsnprintf _vsnprintf
+#ifndef strdup  // For MSVC with _DEBUG, see #1359
 #define strdup(x) _strdup(x)
 #endif
+#endif
 
-typedef unsigned suseconds_t;
 typedef int socklen_t;
 #define MG_DIRSEP '\\'
 #ifndef PATH_MAX
@@ -66,6 +68,10 @@ typedef int socklen_t;
 #ifndef EWOULDBLOCK
 #define EWOULDBLOCK WSAEWOULDBLOCK
 #endif
+
+#define realpath(a, b) _fullpath((b), (a), MG_PATH_MAX)
+#define sleep(x) Sleep(x)
+#define mkdir(a, b) _mkdir(a)
 
 #ifndef va_copy
 #ifdef __va_copy
@@ -80,18 +86,21 @@ typedef int socklen_t;
 
 #define MG_INT64_FMT "%I64d"
 
-#undef MG_ENABLE_DIRLIST
+#ifndef MG_ENABLE_DIRLIST
 #define MG_ENABLE_DIRLIST 1
+#endif
 
 // https://lgtm.com/rules/2154840805/ -gmtime, localtime, ctime and asctime
-static __inline struct tm *gmtime_r(time_t *t, struct tm *tm) {
-  (void) tm;
-  return gmtime(t);
+static __inline struct tm *gmtime_r(const time_t *t, struct tm *tm) {
+  struct tm *x = gmtime(t);
+  *tm = *x;
+  return tm;
 }
 
-static __inline struct tm *localtime_r(time_t *t, struct tm *tm) {
-  (void) tm;
-  return localtime(t);
+static __inline struct tm *localtime_r(const time_t *t, struct tm *tm) {
+  struct tm *x = localtime(t);
+  *tm = *x;
+  return tm;
 }
 
 #endif

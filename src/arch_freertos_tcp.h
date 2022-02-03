@@ -19,9 +19,6 @@
 #include <FreeRTOS_Sockets.h>
 #include <task.h>
 
-#define MG_INT64_FMT "%lld"
-#define MG_DIRSEP '/'
-
 // Why FreeRTOS-TCP did not implement a clean BSD API, but its own thing
 // with FreeRTOS_ prefix, is beyond me
 #define IPPROTO_TCP FREERTOS_IPPROTO_TCP
@@ -59,15 +56,15 @@ static inline void *mg_calloc(int cnt, size_t size) {
 #define calloc(a, b) mg_calloc((a), (b))
 #define free(a) vPortFree(a)
 #define malloc(a) pvPortMalloc(a)
+#define mkdir(a, b) (-1)
 
 #define gmtime_r(a, b) gmtime(a)
 
 #if !defined(__GNUC__)
 // copied from GCC on ARM; for some reason useconds are signed
-typedef long suseconds_t;
 struct timeval {
   time_t tv_sec;
-  suseconds_t tv_usec;
+  long tv_usec;
 };
 #endif
 
