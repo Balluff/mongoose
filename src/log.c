@@ -3,7 +3,7 @@
 
 #if MG_ENABLE_LOG
 static void mg_log_stdout(const void *buf, size_t len, void *userdata) {
-  (void) userdata;
+  (void) userdata, (void) buf, (void) len;
 #if MG_ENABLE_FILE
   fwrite(buf, 1, len, stdout);
 #endif
@@ -14,13 +14,13 @@ static void (*s_fn)(const void *, size_t, void *) = mg_log_stdout;
 static void *s_fn_param = NULL;
 
 void mg_log_set(const char *spec) {
-  LOG(LL_DEBUG, ("Setting log level to %s", spec));
+  MG_DEBUG(("Setting log level to %s", spec));
   s_spec = spec;
 }
 
 bool mg_log_prefix(int level, const char *file, int line, const char *fname) {
   // static unsigned long seq;
-  int max = LL_INFO;
+  int max = MG_LL_INFO;
   struct mg_str k, v, s = mg_str(s_spec);
   const char *p = strrchr(file, '/');
 
@@ -35,17 +35,13 @@ bool mg_log_prefix(int level, const char *file, int line, const char *fname) {
   }
 
   if (level <= max) {
-    char timebuf[21], buf[50] = "";
-    time_t t = time(NULL);
-    struct tm tmp, *tm = gmtime_r(&t, &tmp);
-    int n;
-    (void) tmp;
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm);
-    n = snprintf(buf, sizeof(buf), "%s %d %s:%d:%s", timebuf, level, p, line,
-                 fname);
-    if (n < 0 || n > (int) sizeof(buf) - 2) n = sizeof(buf) - 2;
-    while (n < (int) sizeof(buf) - 1) buf[n++] = ' ';
-    s_fn(buf, sizeof(buf) - 1, s_fn_param);
+    char buf[41];
+    size_t n = mg_snprintf(buf, sizeof(buf), "%llx %d %s:%d:%s", mg_millis(),
+                           level, p, line, fname);
+    if (n > sizeof(buf) - 2) n = sizeof(buf) - 2;
+    while (n < sizeof(buf)) buf[n++] = ' ';
+    buf[sizeof(buf) - 1] = '\0';
+    s_fn(buf, n - 1, s_fn_param);
     return true;
   } else {
     return false;
@@ -55,11 +51,11 @@ bool mg_log_prefix(int level, const char *file, int line, const char *fname) {
 void mg_log(const char *fmt, ...) {
   char mem[256], *buf = mem;
   va_list ap;
-  int len = 0;
+  size_t len;
   va_start(ap, fmt);
   len = mg_vasprintf(&buf, sizeof(mem), fmt, ap);
   va_end(ap);
-  s_fn(buf, len > 0 ? (size_t) len : 0, s_fn_param);
+  s_fn(buf, len, s_fn_param);
   s_fn("\n", 1, s_fn_param);
   if (buf != mem) free(buf);
 }

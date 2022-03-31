@@ -241,7 +241,6 @@ Here is a list of build constants and their default values:
 |MG_ENABLE_LOG | 1 | Enable `LOG()` macro |
 |MG_ENABLE_MD5 | 0 | Use native MD5 implementation |
 |MG_ENABLE_SSI | 1 | Enable serving SSI files by `mg_http_serve_dir()` |
-|MG_ENABLE_DIRLIST | 0 | Enable directory listing |
 |MG_ENABLE_CUSTOM_RANDOM | 0 | Provide custom RNG function `mg_random()` |
 |MG_ENABLE_PACKED_FS | 0 | Enable embedded FS support |
 |MG_ENABLE_FATFS | 0 | Enable embedded FAT FS support |
@@ -286,18 +285,11 @@ to fail due to several undefined symbols. Create `mongoose_custom.c` and impleme
 the following functions (take a look at `src/sock.c` for the reference implementation):
 
 ```c
-struct mg_connection *mg_connect(struct mg_mgr *mgr, const char *url,
-                                 mg_event_handler_t fn, void *fn_data) {
-  // implement this!
-}
-
 void mg_connect_resolved(struct mg_connection *c) {
   // implement this!
 }
 
-
-struct mg_connection *mg_listen(struct mg_mgr *mgr, const char *url,
-                                mg_event_handler_t fn, void *fn_data) {
+bool mg_open_listener(struct mg_connection *c, const char *url) {
   // implement this!
 }
 
@@ -397,7 +389,8 @@ with some housekeeping information.
 struct mg_connection {
   struct mg_connection *next;  // Linkage in struct mg_mgr :: connections
   struct mg_mgr *mgr;          // Our container
-  struct mg_addr peer;         // Remote address. For listeners, local address
+  struct mg_addr loc;          // Local address
+  struct mg_addr rem;          // Remote address
   void *fd;                    // Connected socket, or LWIP data
   unsigned long id;            // Auto-incrementing unique connection ID
   struct mg_iobuf recv;        // Incoming data
@@ -580,14 +573,17 @@ Usage example:
 mg_send(c, "hi", 2);  // Append string "hi" to the output buffer
 ```
 
-### mg\_printf()
+### mg\_printf(), mg\_vprintf()
 
 ```c
 int mg_printf(struct mg_connection *, const char *fmt, ...);
+int mg_vprintf(struct mg_connection *, const char *fmt, va_list ap);
 ```
 
 Same as `mg_send()`, but formats data using `printf()` semantics. Return
 number of bytes appended to the output buffer.
+<span class="badge bg-danger">NOTE: </span> See [mg\_snprintf](#mg_snprintf-mg_vsnprintf)
+for the list of supported format specifiers
 
 Parameters:
 - `c` - a connection pointer
@@ -599,32 +595,6 @@ Usage example:
 
 ```c
 mg_printf(c, "Hello, %s!", "world"); // Add "Hello, world!" to output buffer
-```
-
-### mg\_vprintf()
-
-```c
-int mg_vprintf(struct mg_connection *, const char *fmt, va_list ap);
-```
-
-Same as `mg_printf()`, but takes `va_list` argument as a parameter.
-
-Parameters:
-- `c` - A connection pointer
-- `fmt` - A format string in `printf` semantics
-- `ap` - An arguments list
-
-Return value: Number of bytes appended to the output buffer.
-
-Usage example:
-
-```c
-void foo(struct mg_connection *c, const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  mg_vprintf(c, fmt, ap);
-  va_end(ap);
-}
 ```
 
 ### mg\_straddr
@@ -692,7 +662,11 @@ void mg_mgr_wakeup(struct mg_connection *pipe, const void *buf, size_len len);
 
 Wake up an event manager that sleeps in `mg_mgr_poll()` call. This function
 must be called from a separate task/thread. A calling thread can pass
-some specific data to the IO thread via `buf`, `len`. Parameters:
+some specific data to the IO thread via `buf`, `len`. The maximum value
+of `len` is limited by a maximum UDP datagram size, which is 64KiB. If you need
+to send a large data to the Mongoose thread, `malloc()` the data and send
+a pointer to it, not the data itself. The receiving event handler can receive
+a pointer, send a response, and call `free()`. Parameters:
 
 Parameters:
 - `pipe` - a special connection created by the `mg_mkpipe()` call
@@ -789,6 +763,17 @@ struct mg_connection *c = mg_http_connect(&mgr, "http://google.com", fn, NULL);
 if (c == NULL) fatal_error("Cannot create connection");
 ```
 
+### mg\_http\_status()
+
+```c
+int mg_http_status(const struct mg_http_message *hm);
+```
+
+Get status code of the HTTP response.
+Parameters:
+- `hm` - Parsed HTTP response
+
+Return value: status code, e.g. `200` for success.
 
 ### mg\_http\_get\_request\_len()
 
@@ -1174,61 +1159,6 @@ void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
     }
   }
 }
-```
-
-### mg\_http\_upload()
-
-```c
-int mg_http_upload(struct mg_connection *c, struct mg_http_message *hm,
-                   struct mg_fs *fs, const char *dir);
-```
-
-Handle file upload. See [file upload example](https://github.com/cesanta/mongoose/tree/master/examples/file-uploads/).
-
-This function  expects a series of POST requests with file data. POST requests
-should have `name` and `offset` query string parameters set:
-
-```text
-POST /whatever_uri?name=myfile.txt&offset=1234 HTTP/1.0
-Content-Length: 5
-
-hello
-```
-
-- `name` - A mandatory query string parameter, specifies a file name. It it
-  created in the `dir` directory
-- `offset` - An optional parameter, default `0`. If it set to `0`, or omitted,
-  then a file gets truncated before write. Otherwise, the body of
-  the POST request gets appended to the file
-- Server must call `mg_http_upload()` when `/whatever_uri` is hit
-
-The expected usage of this API function follows:
-- A client splits a file into small enough chunks, to ensure that a chunk
-  fits into the server's RAM
-- Then, each chunk is POST-ed to the server with using URI, like
-  `/some_uri?name=FILENAME&offset=OFFSET`
-- Initial OFFSET is `0`, and subsequent offsets are non-zero
-- Each chunk gets appended to the file
-- When the last chunk is POST-ed, upload finishes
-- POST data must not be encoded in any way; it it saved as-is
-
-Parameters:
-- `c` - Connection to use
-- `hm` - POST message, containing parameters described above
-- `fs` - Filesystem to use
-- `dir` - Path to directory
-
-Return value: Request body length or negative value on error
-
-Usage example:
-
-```c
-// Mongoose events handler
-void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
-  if (ev == MG_EV_HTTP_MSG) {
-    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    mg_http_upload(c, hm, &mg_fs_posix, "."); // Upload to current folder
-  }
 ```
 
 ### mg\_http\_bauth()
@@ -2440,10 +2370,11 @@ unsigned long val = mg_unhex(data, sizeof(data) - 1); // val is now 123
 ```
 
 
-### mg\_asprintf()
+### mg\_asprintf(), mg\_vasprintf()
 
 ```c
 int mg_asprintf(char **buf, size_t size, const char *fmt, ...);
+int mg_vasprintf(char **buf, size_t size, const char *fmt, va_list ap);
 ```
 
 Print message specified by printf-like format string `fmt` into a buffer
@@ -2466,38 +2397,45 @@ char buf[1024], *pbuf = &buf;
 mg_asprintf(&pbuf, sizeof(buf), "Hello, %s!", "world"); // buf is now "Hello, world!"
 ```
 
-### mg\_vasprintf()
-
+### mg\_snprintf(), mg\_vsnprintf()
 ```c
-int mg_vasprintf(char **buf, size_t size, const char *fmt, va_list ap);
+size_t mg_snprintf(char *buf, size_t len, const char *fmt, ...);
+size_t mg_vsnprintf(char *buf, size_t len, const char *fmt, va_list ap);
+size_t mg_asprintf(char **buf, size_t len, const char *fmt, ...);
+size_t mg_vasprintf(char **buf, size_t size, const char *fmt, va_list ap);
 ```
 
-Same as `mg_asprintf()` but uses `va_list` argument.
+Print formatted string into a string buffer, just like `snprintf()`
+standard function does, but in a predictable way that does not depend on
+the C library or the build environment. The return value can be larger
+than the buffer length `len`, in which case the overflow bytes are not printed.
 
 Parameters:
 - `buf` - Pointer to pointer to output buffer
-- `size` - Pre-allocated buffer size
+- `len` - Buffer size
 - `fmt` - printf-like format string
-- `ap` - Parameters list
+
+Supported format specifiers:
+- `hhd`, `hd`, `d`, `ld`, `lld` - for `char`, `short`, `int`, `long`, `int64_t`
+- `hhu`, `hu`, `u`, `lu`, `llu` - same but for unsigned variants
+- `hhx`, `hx`, `x`, `lx`, `llx` - same, unsigned and hex output
+- `s` - `for char *`
+- `c` - `for char`
+- `%` - `the `%` character itself
+- `p` - for any pointer, prints `0x.....` hex value
+- `%X.Y` - optional width and precision modifiers
+- `%.*` - optional precision modifier specified as `int` argument
 
 Return value: Number of bytes printed
 
 Usage example:
+
 ```c
-void foo(const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  char buf[1024], *pbuf = buf;
-  mg_vasprintf(&pbuf, sizeof(buf), fmt, ap);
-  va_end(ap);
-
-  printf("%s\n", buf);
-}
-
-// ...
-
-foo("Hello, %s!", "world"); // Print "Hello, world!
-
+mg_snprintf(buf, sizeof(buf), "%lld", (int64_t) 123);   // 123
+mg_snprintf(buf, sizeof(buf), "%.2s", "abcdef");        // ab
+mg_snprintf(buf, sizeof(buf), "%.*s", 2, "abcdef");     // ab
+mg_snprintf(buf, sizeof(buf), "%05x", 123);             // 00123
+mg_snprintf(buf, sizeof(buf), "%%-%3s", "a");           // %-  a
 ```
 
 ### mg\_to64()

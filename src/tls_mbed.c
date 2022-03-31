@@ -24,39 +24,40 @@ void mg_tls_free(struct mg_connection *c) {
   }
 }
 
-static bool mg_wouldblock(int n) {
-  return n < 0 &&
-         (errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK);
-}
+bool mg_sock_would_block(void);
 
 static int mg_net_send(void *ctx, const unsigned char *buf, size_t len) {
-  int fd = *(int *) ctx;
+  struct mg_connection *c = (struct mg_connection *) ctx;
+  int fd = (int) (size_t) c->fd;
   int n = (int) send(fd, buf, len, 0);
+  MG_VERBOSE(("%lu n=%d, errno=%d", c->id, n, errno));
   if (n > 0) return n;
-  if (mg_wouldblock(n)) return MBEDTLS_ERR_SSL_WANT_WRITE;
+  if (n < 0 && mg_sock_would_block()) return MBEDTLS_ERR_SSL_WANT_WRITE;
   return MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
 static int mg_net_recv(void *ctx, unsigned char *buf, size_t len) {
-  int fd = *(int *) ctx;
-  int n = (int) recv(fd, buf, len, 0);
+  struct mg_connection *c = (struct mg_connection *) ctx;
+  int n, fd = (int) (size_t) c->fd;
+  n = (int) recv(fd, buf, len, 0);
+  MG_VERBOSE(("%lu n=%d, errno=%d", c->id, n, errno));
   if (n > 0) return n;
-  if (mg_wouldblock(n)) return MBEDTLS_ERR_SSL_WANT_READ;
+  if (n < 0 && mg_sock_would_block()) return MBEDTLS_ERR_SSL_WANT_READ;
   return MBEDTLS_ERR_NET_RECV_FAILED;
 }
 
 void mg_tls_handshake(struct mg_connection *c) {
   struct mg_tls *tls = (struct mg_tls *) c->tls;
   int rc;
-  mbedtls_ssl_set_bio(&tls->ssl, &c->fd, mg_net_send, mg_net_recv, 0);
+  mbedtls_ssl_set_bio(&tls->ssl, c, mg_net_send, mg_net_recv, 0);
   rc = mbedtls_ssl_handshake(&tls->ssl);
   if (rc == 0) {  // Success
-    LOG(LL_DEBUG, ("%lu success", c->id));
+    MG_DEBUG(("%lu success", c->id));
     c->is_tls_hs = 0;
   } else if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
              rc == MBEDTLS_ERR_SSL_WANT_WRITE) {  // Still pending
-    LOG(LL_VERBOSE_DEBUG, ("%lu pending, %d%d %d (-%#x)", c->id,
-                           c->is_connecting, c->is_tls_hs, rc, -rc));
+    MG_VERBOSE(("%lu pending, %d%d %d (-%#x)", c->id, c->is_connecting,
+                c->is_tls_hs, rc, -rc));
   } else {
     mg_error(c, "TLS handshake: -%#x", -rc);  // Error
   }
@@ -70,10 +71,8 @@ static int mbed_rng(void *ctx, unsigned char *buf, size_t len) {
 
 static void debug_cb(void *c, int lev, const char *s, int n, const char *s2) {
   n = (int) strlen(s2) - 1;
-  LOG(LL_VERBOSE_DEBUG, ("%p %.*s", ((struct mg_connection *) c)->fd, n, s2));
+  MG_VERBOSE(("%lu %d %.*s", ((struct mg_connection *) c)->id, lev, n, s2));
   (void) s;
-  (void) c;
-  (void) lev;
 }
 
 #if defined(MBEDTLS_VERSION_NUMBER) && MBEDTLS_VERSION_NUMBER >= 0x03000000
@@ -100,7 +99,7 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
     mg_error(c, "TLS OOM");
     goto fail;
   }
-  LOG(LL_DEBUG, ("%lu Setting TLS", c->id));
+  MG_DEBUG(("%lu Setting TLS", c->id));
   mbedtls_ssl_init(&tls->ssl);
   mbedtls_ssl_config_init(&tls->conf);
   mbedtls_x509_crt_init(&tls->ca);
@@ -108,6 +107,9 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
   mbedtls_x509_crt_init(&tls->cert);
   mbedtls_pk_init(&tls->pk);
   mbedtls_ssl_conf_dbg(&tls->conf, debug_cb, c);
+#if defined(MG_MBEDTLS_DEBUG_LEVEL)
+  mbedtls_debug_set_threshold(MG_MBEDTLS_DEBUG_LEVEL);
+#endif
   if ((rc = mbedtls_ssl_config_defaults(
            &tls->conf,
            c->is_client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER,
@@ -132,7 +134,7 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
     tls->cafile = strdup(opts->ca);
     rc = mbedtls_ssl_conf_ca_chain_file(&tls->conf, tls->cafile, &tls->crl);
     if (rc != 0) {
-      mg_error(c, "parse on-disk chain(%s) err %#x", ca, -rc);
+      mg_error(c, "parse on-disk chain(%s) err %#x", tls->cafile, -rc);
       goto fail;
     }
 #else

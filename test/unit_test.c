@@ -152,7 +152,7 @@ static void test_http_get_var(void) {
 }
 
 static int vcmp(struct mg_str s1, const char *s2) {
-  // LOG(LL_INFO, ("->%.*s<->%s<- %d %d %d", (int) s1.len, s1.ptr, s2,
+  // MG_INFO(("->%.*s<->%s<- %d %d %d", (int) s1.len, s1.ptr, s2,
   //(int) s1.len, strncmp(s1.ptr, s2, s1.len), mg_vcmp(&s1, s2)));
   return mg_vcmp(&s1, s2) == 0;
 }
@@ -315,10 +315,10 @@ static void test_sntp(void) {
         "\xc9\xd6\xa2\xdb\xde\xea\x30\x91\x86\xb7\x10\xdb\xde"
         "\xed\x98\x00\x00\x00\xde\xdb\xde\xed\x99\x0a\xe2\xc7"
         "\x96\xdb\xde\xed\x99\x0a\xe4\x6b\xda";
-    struct tm tm;
-    time_t t;
     ASSERT((ms = mg_sntp_parse(sntp_good, sizeof(sntp_good))) > 0);
-    t = (time_t) (ms / 1000);
+#if MG_ARCH == MG_ARCH_UNIX
+    time_t t = (time_t) (ms / 1000);
+    struct tm tm;
     gmtime_r(&t, &tm);
     ASSERT(tm.tm_year == 116);
     ASSERT(tm.tm_mon == 10);
@@ -326,6 +326,7 @@ static void test_sntp(void) {
     ASSERT(tm.tm_hour == 16);
     ASSERT(tm.tm_min == 15);
     ASSERT(tm.tm_sec == 21);
+#endif
     ASSERT(mg_sntp_parse(bad_good, sizeof(bad_good)) < 0);
   }
 
@@ -368,7 +369,7 @@ static void test_mqtt(void) {
   mg_mqtt_sub(c, topic, 1);
   mg_mqtt_pub(c, topic, data, 1, false);
   for (i = 0; i < 300 && buf[1] == 0; i++) mg_mgr_poll(&mgr, 10);
-  // LOG(LL_INFO, ("[%s]", buf));
+  // MG_INFO(("[%s]", buf));
   ASSERT(strcmp(buf, "Xx/f12/hi") == 0);
 
   // Set params
@@ -398,9 +399,8 @@ static void eh1(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   if (ev == MG_EV_ACCEPT && topts != NULL) mg_tls_init(c, topts);
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    LOG(LL_INFO,
-        ("[%.*s %.*s] message len %d", (int) hm->method.len, hm->method.ptr,
-         (int) hm->uri.len, hm->uri.ptr, (int) hm->message.len));
+    MG_INFO(("[%.*s %.*s] message len %d", (int) hm->method.len, hm->method.ptr,
+             (int) hm->uri.len, hm->uri.ptr, (int) hm->message.len));
     if (mg_http_match_uri(hm, "/foo/*")) {
       mg_http_reply(c, 200, "", "uri: %.*s", hm->uri.len - 5, hm->uri.ptr + 5);
     } else if (mg_http_match_uri(hm, "/ws")) {
@@ -548,7 +548,7 @@ static void test_ws(void) {
   ASSERT(mg_http_listen(&mgr, url, eh1, NULL) != NULL);
   mg_ws_connect(&mgr, url, wcb, &done, "%s", "Sec-WebSocket-Protocol: meh\r\n");
   for (i = 0; i < 30; i++) mg_mgr_poll(&mgr, 1);
-  // LOG(LL_INFO, ("--> %d", done));
+  // MG_INFO(("--> %d", done));
   ASSERT(done == 112);
 
   // Test that non-WS requests fail
@@ -609,7 +609,7 @@ static void test_http_server(void) {
     char etag[100];
     size_t size = 0;
     time_t mtime = 0;
-    ASSERT(mg_fs_posix.stat("./test/data/a.txt", &size, &mtime) != 0);
+    ASSERT(mg_fs_posix.st("./test/data/a.txt", &size, &mtime) != 0);
     ASSERT(mg_http_etag(etag, sizeof(etag), size, mtime) == etag);
     ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\nIf-None-Match: %s\n\n",
                  etag) == 304);
@@ -627,7 +627,7 @@ static void test_http_server(void) {
   }
 
   ASSERT(fetch(&mgr, buf, url, "GET /foo/1 HTTP/1.0\r\n\n") == 200);
-  // LOG(LL_INFO, ("%d %.*s", (int) hm.len, (int) hm.len, hm.buf));
+  // MG_INFO(("%d %.*s", (int) hm.len, (int) hm.len, hm.buf));
   ASSERT(cmpbody(buf, "uri: 1") == 0);
 
   ASSERT(fetch(&mgr, buf, url, "%s",
@@ -760,7 +760,7 @@ static void test_http_server(void) {
 
 #if MG_ENABLE_IPV6
   {
-    const char *url6 = "http://[::1]:12346";
+    const char *url6 = "http://[::1]:12366";
     ASSERT(mg_http_listen(&mgr, url6, eh1, NULL) != NULL);
     ASSERT(fetch(&mgr, buf, url6, "GET /a.txt HTTP/1.0\n\n") == 200);
     ASSERT(cmpbody(buf, "hello\n") == 0);
@@ -784,7 +784,7 @@ static void test_tls(void) {
   c = mg_http_listen(&mgr, url, eh1, (void *) &opts);
   ASSERT(c != NULL);
   ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\n\n") == 200);
-  // LOG(LL_INFO, ("%s", buf));
+  // MG_INFO(("%s", buf));
   ASSERT(cmpbody(buf, "hello\n") == 0);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
@@ -793,17 +793,17 @@ static void test_tls(void) {
 
 static void f3(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   int *ok = (int *) fn_data;
-  // LOG(LL_INFO, ("%d", ev));
+  // MG_INFO(("%d", ev));
   if (ev == MG_EV_CONNECT) {
     // c->is_hexdumping = 1;
     mg_printf(c, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n",
-              c->peer.is_ip6 ? "ipv6.google.com" : "cesanta.com");
+              c->rem.is_ip6 ? "ipv6.google.com" : "cesanta.com");
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    // LOG(LL_INFO, ("-->[%.*s]", (int) hm->message.len, hm->message.ptr));
+    // MG_INFO(("-->[%.*s]", (int) hm->message.len, hm->message.ptr));
     // ASSERT(mg_vcmp(&hm->method, "HTTP/1.1") == 0);
     // ASSERT(mg_vcmp(&hm->uri, "301") == 0);
-    *ok = atoi(hm->uri.ptr);
+    *ok = mg_http_status(hm);
   } else if (ev == MG_EV_CLOSE) {
     if (*ok == 0) *ok = 888;
   } else if (ev == MG_EV_ERROR) {
@@ -825,12 +825,23 @@ static void test_http_client(void) {
   ok = 0;
 #if MG_ENABLE_MBEDTLS || MG_ENABLE_OPENSSL
   {
-    struct mg_tls_opts opts = {.ca = "./test/data/ca.pem"};
-    c = mg_http_connect(&mgr, "https://cesanta.com", f3, &ok);
+    const char *url = "https://cesanta.com";
+    struct mg_str host = mg_url_host(url);
+    struct mg_tls_opts opts = {.ca = "./test/data/ca.pem", .srvname = host};
+    c = mg_http_connect(&mgr, url, f3, &ok);
     ASSERT(c != NULL);
     mg_tls_init(c, &opts);
     for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
     ASSERT(ok == 200);
+
+    // Test failed host validation
+    ok = 0;
+    opts.srvname = mg_str("dummy");
+    c = mg_http_connect(&mgr, url, f3, &ok);
+    ASSERT(c != NULL);
+    mg_tls_init(c, &opts);
+    for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
+    ASSERT(ok == 777);
   }
 #endif
 
@@ -887,7 +898,7 @@ static void test_http_pipeline(void) {
   c = mg_http_connect(&mgr, url, NULL, NULL);
   mg_printf(c, "POST / HTTP/1.0\nContent-Length: 5\n\n12345GET / HTTP/1.0\n\n");
   for (i = 0; i < 20; i++) mg_mgr_poll(&mgr, 1);
-  // LOG(LL_INFO, ("-----> [%d]", ok));
+  // MG_INFO(("-----> [%d]", ok));
   ASSERT(ok == 2);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
@@ -1067,7 +1078,7 @@ static void test_http_range(void) {
   ASSERT(mg_http_parse(buf, strlen(buf), &hm) > 0);
   ASSERT(mg_strcmp(hm.uri, mg_str("206")) == 0);
   ASSERT(mg_strcmp(hm.body, mg_str("is disease.\n")) == 0);
-  // LOG(LL_INFO, ("----%d\n[%s]", (int) hm.body.len, buf));
+  // MG_INFO(("----%d\n[%s]", (int) hm.body.len, buf));
 
   // Fetch past EOF, must trigger 416 response
   fetch(&mgr, buf, url, "%s", "GET /range.txt HTTP/1.0\nRange: bytes=999-\n\n");
@@ -1094,7 +1105,7 @@ static void test_timer(void) {
   int v1 = 0, v2 = 0, v3 = 0;
   struct mg_timer t1, t2, t3;
 
-  LOG(LL_INFO, ("g_timers: %p", g_timers));
+  MG_INFO(("g_timers: %p", g_timers));
   ASSERT(g_timers == NULL);
 
   mg_timer_init(&t1, 5, MG_TIMER_REPEAT, f1, &v1);
@@ -1191,6 +1202,33 @@ static void test_timer(void) {
   ASSERT(g_timers == NULL);
 }
 
+static bool sn(const char *fmt, ...) {
+  char buf[100], tmp[1] = {0}, buf2[sizeof(buf)];
+  size_t n, n2, n1;
+  va_list ap;
+  bool result;
+  va_start(ap, fmt);
+  n = (size_t) vsnprintf(buf2, sizeof(buf2), fmt, ap);
+  va_end(ap);
+  va_start(ap, fmt);
+  n1 = mg_vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  va_start(ap, fmt);
+  n2 = mg_vsnprintf(tmp, 0, fmt, ap);
+  va_end(ap);
+  result = n1 == n2 && n1 == n && strcmp(buf, buf2) == 0;
+  if (!result)
+    MG_ERROR(("[%s] -> [%s] != [%s] %d %d %d\n", fmt, buf, buf2, (int) n1,
+              (int) n2, (int) n));
+  return result;
+}
+
+static bool sccmp(const char *s1, const char *s2, int expected) {
+  int n1 = mg_casecmp(s1, s2);
+  MG_INFO(("[%s] [%s] %d %d", s1, s2, n1, expected));
+  return n1 == expected;
+}
+
 static void test_str(void) {
   struct mg_str s = mg_strdup(mg_str("a"));
   ASSERT(mg_strcmp(s, mg_str("a")) == 0);
@@ -1201,6 +1239,55 @@ static void test_str(void) {
   ASSERT(mg_strstr(mg_str("abc"), mg_str("d")) == NULL);
   ASSERT(mg_strstr(mg_str("abc"), mg_str("b")) != NULL);
   ASSERT(mg_strcmp(mg_str("hi"), mg_strstrip(mg_str(" \thi\r\n"))) == 0);
+
+  ASSERT(sccmp("", "", 0));
+  ASSERT(sccmp("", "1", -49));
+  ASSERT(sccmp("a", "A", 0));
+  ASSERT(sccmp("a1", "A", 49));
+  ASSERT(sccmp("a", "A1", -49));
+
+  ASSERT(sn("%d", 0));
+  ASSERT(sn("%d", 1));
+  ASSERT(sn("%d", -1));
+  ASSERT(sn("%.*s", 1, "ab"));
+  ASSERT(sn("%.1s", "ab"));
+  ASSERT(sn("%.99s", "a"));
+  ASSERT(sn("%11s", "a"));
+  ASSERT(sn("%s", "a\0b"));
+  ASSERT(sn("%2s", "a"));
+  ASSERT(sn("%.*s", 3, "a\0b"));
+  ASSERT(sn("%d", 7));
+  ASSERT(sn("%d", 123));
+#if MG_ARCH == MG_ARCH_UNIX
+  ASSERT(sn("%lld", (uint64_t) 0xffffffffff));
+  ASSERT(sn("%lld", (uint64_t) -1));
+  ASSERT(sn("%llu", (uint64_t) -1));
+  ASSERT(sn("%llx", (uint64_t) 0xffffffffff));
+  ASSERT(sn("%p", (void *) (size_t) 7));
+#endif
+  ASSERT(sn("%lx", (unsigned long) 0x6204d754));
+  ASSERT(sn("ab"));
+  ASSERT(sn("%dx", 1));
+  ASSERT(sn("%sx", "a"));
+  ASSERT(sn("%cx", 32));
+  ASSERT(sn("%x", 15));
+  ASSERT(sn("%2x", 15));
+  ASSERT(sn("%02x", 15));
+  ASSERT(sn("%hx:%hhx", (short) 1, (char) 2));
+  ASSERT(sn("%hx:%hhx", (short) 1, (char) 2));
+  ASSERT(sn("%%"));
+  ASSERT(sn("%x", 15));
+  ASSERT(sn("%#x", 15));
+  ASSERT(sn("%#6x", 15));
+  ASSERT(sn("%#06x", 15));
+  ASSERT(sn("%#-6x", 15));
+  ASSERT(sn("%-2s!", "a"));
+  ASSERT(sn("%s %s", "a", "b"));
+  ASSERT(sn("%s %s", "a", "b"));
+  ASSERT(sn("ab%dc", 123));
+  ASSERT(sn("%s ", "a"));
+  ASSERT(sn("%s %s", "a", "b"));
+  ASSERT(sn("%2s %s", "a", "b"));
 }
 
 static void fn1(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
@@ -1216,12 +1303,12 @@ static void test_dns_timeout(const char *dns_server_url, const char *errstr) {
   mg_mgr_init(&mgr);
   mgr.dns4.url = dns_server_url;
   mgr.dnstimeout = 10;
-  LOG(LL_DEBUG, ("opening dummy DNS listener..."));
+  MG_DEBUG(("opening dummy DNS listener..."));
   mg_listen(&mgr, mgr.dns4.url, NULL, NULL);  // Just discard our queries
   mg_http_connect(&mgr, "http://google.com", fn1, buf);
   for (i = 0; i < 50 && buf[0] == '\0'; i++) mg_mgr_poll(&mgr, 1);
   mg_mgr_free(&mgr);
-  LOG(LL_DEBUG, ("buf: [%s]", buf));
+  MG_DEBUG(("buf: [%s]", buf));
   ASSERT(strcmp(buf, errstr) == 0);
 }
 
@@ -1243,6 +1330,33 @@ static void test_dns(void) {
   memset(&dm, 0, sizeof(dm));
   ASSERT(mg_dns_parse(data, sizeof(data), &dm) == 1);
   ASSERT(strcmp(dm.name, "") == 0);
+
+  {
+    // 0000  00 01 81 80 00 01 00 04 00 00 00 00 05 79 61 68  .............yah
+    // 0010  6f 6f 05 63 31 31 32 36 03 63 6f 6d 00 00 01 00  oo.c1126.com....
+    // 0020  01 c0 0c 00 05 00 01 00 00 0d 34 00 0c 03 77 77  ..........4...ww
+    // 0030  77 05 79 61 68 6f 6f c0 18 c0 2d 00 05 00 01 00  w.yahoo...-.....
+    // 0040  00 00 01 00 14 0b 6e 65 77 2d 66 70 2d 73 68 65  ......new-fp-she
+    // 0050  64 03 77 67 31 01 62 c0 31 c0 45 00 01 00 01 00  d.wg1.b.1.E.....
+    // 0060  00 00 0a 00 04 57 f8 64 d8 c0 45 00 01 00 01 00  .....W.d..E.....
+    // 0070  00 00 0a 00 04 57 f8 64 d7                       .....W.d.
+    uint8_t d[] = {
+        0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x00, 0x05, 0x79, 0x61, 0x68, 0x6f, 0x6f, 0x05, 0x63, 0x31, 0x31,
+        0x32, 0x36, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+        0xc0, 0x0c, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x0d, 0x34, 0x00,
+        0x0c, 0x03, 0x77, 0x77, 0x77, 0x05, 0x79, 0x61, 0x68, 0x6f, 0x6f,
+        0xc0, 0x18, 0xc0, 0x2d, 0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x14, 0x0b, 0x6e, 0x65, 0x77, 0x2d, 0x66, 0x70, 0x2d,
+        0x73, 0x68, 0x65, 0x64, 0x03, 0x77, 0x67, 0x31, 0x01, 0x62, 0xc0,
+        0x31, 0xc0, 0x45, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a,
+        0x00, 0x04, 0x57, 0xf8, 0x64, 0xd8, 0xc0, 0x45, 0x00, 0x01, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x04, 0x57, 0xf8, 0x64, 0xd7,
+    };
+    ASSERT(mg_dns_parse(d, sizeof(d), &dm) == 1);
+    // MG_INFO(("[%s]", dm.name));
+    ASSERT(strcmp(dm.name, "new-fp-shed.wg1.b.yahoo.com") == 0);
+  }
 
   test_dns_timeout("udp://127.0.0.1:12345", "DNS timeout");
   test_dns_timeout("", "resolver");
@@ -1337,9 +1451,9 @@ static void test_util(void) {
 
   {
     s = buf;
-    mg_asprintf(&s, sizeof(buf), "%s", "%3d", 123);
+    mg_asprintf(&s, sizeof(buf), "%3d", 123);
     ASSERT(s == buf);
-    ASSERT(strcmp(buf, "%3d") == 0);
+    ASSERT(strcmp(buf, "123") == 0);
     mg_asprintf(&s, sizeof(buf), "%.*s", 7, "a%40b.c");
     ASSERT(s == buf);
     ASSERT(strcmp(buf, "a%40b.c") == 0);
@@ -1386,7 +1500,7 @@ static void eh3(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
     mg_printf(c, "GET / HTTP/1.0\n\n");
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    // LOG(LL_INFO, ("----> [%.*s]", (int) hm->body.len, hm->body.ptr));
+    // MG_INFO(("----> [%.*s]", (int) hm->body.len, hm->body.ptr));
     c->is_closing = 1;
     *(uint32_t *) fn_data = mg_crc32(0, hm->body.ptr, hm->body.len);
   }
@@ -1403,7 +1517,7 @@ static void eh4(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     *crc = mg_crc32(*crc, hm->body.ptr, hm->body.len);
-    // LOG(LL_INFO, ("MSG [%.*s]", (int) hm->body.len, hm->body.ptr));
+    // MG_INFO(("MSG [%.*s]", (int) hm->body.len, hm->body.ptr));
     c->is_closing = 1;
     *(uint32_t *) fn_data = *crc;
   }
@@ -1418,14 +1532,14 @@ static void eh5(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   } else if (ev == MG_EV_HTTP_CHUNK) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     *crc = mg_crc32(*crc, hm->chunk.ptr, hm->chunk.len);
-    // LOG(LL_INFO, ("CHUNK [%.*s]", (int) hm->chunk.len, hm->chunk.ptr));
+    // MG_INFO(("CHUNK [%.*s]", (int) hm->chunk.len, hm->chunk.ptr));
     mg_http_delete_chunk(c, hm);
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     *crc = mg_crc32(*crc, hm->chunk.ptr, hm->chunk.len);
     c->is_closing = 1;
     *(uint32_t *) fn_data = *crc;
-    // LOG(LL_INFO, ("MSG [%.*s]", (int) hm->body.len, hm->body.ptr));
+    // MG_INFO(("MSG [%.*s]", (int) hm->body.len, hm->body.ptr));
   }
   (void) ev_data;
 }
@@ -1479,12 +1593,12 @@ static void test_multipart(void) {
   ASSERT(mg_http_next_multipart(mg_str(""), 0, NULL) == 0);
   ASSERT((ofs = mg_http_next_multipart(mg_str(s), 0, &part)) > 0);
   ASSERT(mg_strcmp(part.name, mg_str("val")) == 0);
-  // LOG(LL_INFO, ("--> [%.*s]", (int) part.body.len, part.body.ptr));
+  // MG_INFO(("--> [%.*s]", (int) part.body.len, part.body.ptr));
   ASSERT(mg_strcmp(part.body, mg_str("abc\r\ndef")) == 0);
   ASSERT(part.filename.len == 0);
   ASSERT((ofs = mg_http_next_multipart(mg_str(s), ofs, &part)) > 0);
   ASSERT(mg_strcmp(part.name, mg_str("foo")) == 0);
-  // LOG(LL_INFO, ("--> [%.*s]", (int) part.filename.len, part.filename.ptr));
+  // MG_INFO(("--> [%.*s]", (int) part.filename.len, part.filename.ptr));
   ASSERT(mg_strcmp(part.filename, mg_str("a b.txt")) == 0);
   ASSERT(mg_strcmp(part.body, mg_str("hello world\r\n")) == 0);
   ASSERT(mg_http_next_multipart(mg_str(s), ofs, &part) == 0);
@@ -1495,7 +1609,7 @@ static void eh7(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     struct mg_http_serve_opts sopts;
     memset(&sopts, 0, sizeof(sopts));
-    sopts.root_dir = "";
+    sopts.root_dir = "/";
     sopts.fs = &mg_fs_packed;
     mg_http_serve_dir(c, hm, &sopts);
   }
@@ -1573,7 +1687,7 @@ static void test_udp(void) {
   mg_listen(&mgr, url, u1, (void *) &done);
   mg_connect(&mgr, url, u1, (void *) &done);
   for (i = 0; i < 5; i++) mg_mgr_poll(&mgr, 1);
-  // LOG(LL_INFO, ("%d", done));
+  // MG_INFO(("%d", done));
   ASSERT(done == 111);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
@@ -1593,9 +1707,14 @@ static void test_check_ip_acl(void) {
 }
 
 static void w3(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
-  // LOG(LL_INFO, ("ev %d", ev));
+  // MG_INFO(("ev %d", ev));
   if (ev == MG_EV_WS_OPEN) {
+    char buf[8192];
+    memset(buf, 'A', sizeof(buf));
     mg_ws_send(c, "hi there!", 9, WEBSOCKET_OP_TEXT);
+    mg_printf(c, "%s", "boo");
+    mg_ws_wrap(c, 3, WEBSOCKET_OP_TEXT),
+        mg_ws_send(c, buf, sizeof(buf), WEBSOCKET_OP_TEXT);
   } else if (ev == MG_EV_WS_MSG) {
     struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
     ASSERT(mg_strcmp(wm->data, mg_str("lebowski")) == 0);
@@ -1628,7 +1747,13 @@ static void w2(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
     }
   } else if (ev == MG_EV_WS_MSG) {
     struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
-    ASSERT(mg_strcmp(wm->data, mg_str("hi there!")) == 0);
+    if (wm->data.len == 9) {
+      ASSERT(mg_strcmp(wm->data, mg_str("hi there!")) == 0);
+    } else if (wm->data.len == 3) {
+      ASSERT(mg_strcmp(wm->data, mg_str("boo")) == 0);
+    } else {
+      ASSERT(wm->data.len == 8192);
+    }
   }
 }
 
@@ -1641,7 +1766,7 @@ static void test_ws_fragmentation(void) {
   ASSERT(mg_http_listen(&mgr, url, w2, NULL) != NULL);
   mg_ws_connect(&mgr, url, w3, &done, "%s", "Sec-WebSocket-Protocol: echo\r\n");
   for (i = 0; i < 25; i++) mg_mgr_poll(&mgr, 1);
-  // LOG(LL_INFO, ("--> %d", done));
+  // MG_INFO(("--> %d", done));
   ASSERT(done == 11);
 
   mg_mgr_free(&mgr);
@@ -1683,7 +1808,7 @@ static void test_get_header_var(void) {
   struct mg_str header = mg_str("Digest foo=\"bar\", blah,boo=baz, x=\"yy\"");
   struct mg_str yy = mg_str("yy");
   // struct mg_str x = mg_http_get_header_var(header, mg_str("x"));
-  // LOG(LL_INFO, ("--> [%d] [%d]", (int) x.len, yy.len));
+  // MG_INFO(("--> [%d] [%d]", (int) x.len, yy.len));
   ASSERT(mg_strcmp(empty, mg_http_get_header_var(empty, empty)) == 0);
   ASSERT(mg_strcmp(empty, mg_http_get_header_var(header, empty)) == 0);
   ASSERT(mg_strcmp(empty, mg_http_get_header_var(header, mg_str("fooo"))) == 0);
@@ -1695,7 +1820,11 @@ static void test_get_header_var(void) {
 }
 
 int main(void) {
-  mg_log_set("3");
+  const char *debug_level = getenv("V");
+  if (debug_level == NULL) debug_level = "3";
+  mg_log_set(debug_level);
+
+  test_str();
   test_globmatch();
   test_get_header_var();
   test_rewrites();
@@ -1710,7 +1839,6 @@ int main(void) {
   test_util();
   test_sntp();
   test_dns();
-  test_str();
   test_timer();
   test_url();
   test_iobuf();
@@ -1720,8 +1848,8 @@ int main(void) {
   test_tls();
   test_ws();
   test_ws_fragmentation();
-  test_http_server();
   test_http_client();
+  test_http_server();
   test_http_no_content_length();
   test_http_pipeline();
   test_http_range();

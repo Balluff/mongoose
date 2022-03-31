@@ -1,6 +1,6 @@
 #pragma once
 
-#if MG_ARCH == MG_ARCH_FREERTOS_LWIP
+#if MG_ARCH == MG_ARCH_RTX_LWIP
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -19,25 +19,12 @@ struct timeval {
 };
 #endif
 
-#include <FreeRTOS.h>
-#include <task.h>
-
 #include <lwip/sockets.h>
 
 #if LWIP_SOCKET != 1
 // Sockets support disabled in LWIP by default
 #error Set LWIP_SOCKET variable to 1 (in lwipopts.h)
 #endif
-
-// Re-route calloc/free to the FreeRTOS's functions, don't use stdlib
-static inline void *mg_calloc(int cnt, size_t size) {
-  void *p = pvPortMalloc(cnt * size);
-  if (p != NULL) memset(p, 0, size);
-  return p;
-}
-#define calloc(a, b) mg_calloc((a), (b))
-#define free(a) vPortFree(a)
-#define malloc(a) pvPortMalloc(a)
 
 #define mkdir(a, b) (-1)
 
@@ -49,4 +36,5 @@ static inline void *mg_calloc(int cnt, size_t size) {
 #define MG_PATH_MAX 128
 #endif
 
-#endif  // MG_ARCH == MG_ARCH_FREERTOS_LWIP
+
+#endif

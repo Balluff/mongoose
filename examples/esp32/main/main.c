@@ -12,7 +12,7 @@
 // SPIFFS is flat, so tell Mongoose that the FS root is a directory
 // This cludge is not required for filesystems with directory support
 static int my_stat(const char *path, size_t *size, time_t *mtime) {
-  int flags = mg_fs_posix.stat(path, size, mtime);
+  int flags = mg_fs_posix.st(path, size, mtime);
   if (strcmp(path, FS_ROOT) == 0) flags |= MG_FS_DIR;
   return flags;
 }
@@ -27,7 +27,7 @@ static void cb(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
       mg_http_reply(c, 200, "", "{\"ram\": %lu}\n", xPortGetFreeHeapSize());
     } else {
       struct mg_fs fs = mg_fs_posix;
-      fs.stat = my_stat;
+      fs.st = my_stat;
       struct mg_http_serve_opts opts = {.root_dir = FS_ROOT, .fs = &fs};
       mg_http_serve_dir(c, hm, &opts);
     }
@@ -39,7 +39,7 @@ void app_main(void) {
   esp_vfs_spiffs_conf_t conf = {
       .base_path = FS_ROOT, .max_files = 20, .format_if_mount_failed = true};
   int res = esp_vfs_spiffs_register(&conf);
-  LOG(res == ESP_OK ? LL_INFO : LL_ERROR, ("FS %s, %d", conf.base_path, res));
+  MG_INFO(("FS %s, %d", conf.base_path, res));
   mg_file_printf(&mg_fs_posix, FS_ROOT "/hello.txt", "%s", "hello from ESP");
 
   // Setup wifi. This function is implemented in wifi.c
@@ -52,6 +52,6 @@ void app_main(void) {
   mg_log_set("3");
   mg_mgr_init(&mgr);
   mg_http_listen(&mgr, "http://0.0.0.0:80", cb, &mgr);  // Listening server
-  LOG(LL_INFO, ("Starting Mongoose web server v%s", MG_VERSION));
+  MG_INFO(("Starting Mongoose web server v%s", MG_VERSION));
   for (;;) mg_mgr_poll(&mgr, 1000);  // Infinite event loop
 }
