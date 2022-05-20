@@ -1,6 +1,7 @@
 #include "net.h"
 #include "dns.h"
 #include "log.h"
+#include "timer.h"
 #include "tls.h"
 #include "util.h"
 
@@ -138,7 +139,8 @@ bool mg_aton(struct mg_str str, struct mg_addr *addr) {
 }
 
 struct mg_connection *mg_alloc_conn(struct mg_mgr *mgr) {
-  struct mg_connection *c = (struct mg_connection *) calloc(1, sizeof(*c));
+  struct mg_connection *c =
+      (struct mg_connection *) calloc(1, sizeof(*c) + mgr->extraconnsize);
   if (c != NULL) {
     c->mgr = mgr;
     c->id = ++mgr->nextid;
@@ -175,8 +177,9 @@ struct mg_connection *mg_connect(struct mg_mgr *mgr, const char *url,
     c->is_udp = (strncmp(url, "udp:", 4) == 0);
     c->fn = fn;
     c->is_client = true;
+    c->fd = (void *) (size_t) -1;  // Set to invalid socket
     c->fn_data = fn_data;
-    MG_DEBUG(("%lu -> %s", c->id, url));
+    MG_DEBUG(("%lu -1 %s", c->id, url));
     mg_call(c, MG_EV_OPEN, NULL);
     mg_resolve(c, url);
   }
@@ -198,13 +201,36 @@ struct mg_connection *mg_listen(struct mg_mgr *mgr, const char *url,
     c->fn = fn;
     c->fn_data = fn_data;
     mg_call(c, MG_EV_OPEN, NULL);
-    MG_DEBUG(("%lu %s port %u", c->id, url, mg_ntohs(c->rem.port)));
+    MG_DEBUG(("%lu %p %s", c->id, c->fd, url));
   }
   return c;
 }
 
+struct mg_connection *mg_wrapfd(struct mg_mgr *mgr, int fd,
+                                mg_event_handler_t fn, void *fn_data) {
+  struct mg_connection *c = mg_alloc_conn(mgr);
+  if (c != NULL) {
+    c->fd = (void *) (size_t) fd;
+    c->fn = fn;
+    c->fn_data = fn_data;
+    mg_call(c, MG_EV_OPEN, NULL);
+    LIST_ADD_HEAD(struct mg_connection, &mgr->conns, c);
+  }
+  return c;
+}
+
+struct mg_timer *mg_timer_add(struct mg_mgr *mgr, uint64_t milliseconds,
+                              unsigned flags, void (*fn)(void *), void *arg) {
+  struct mg_timer *t = (struct mg_timer *) calloc(1, sizeof(*t));
+  mg_timer_init(&mgr->timers, t, milliseconds, flags, fn, arg);
+  return t;
+}
+
 void mg_mgr_free(struct mg_mgr *mgr) {
   struct mg_connection *c;
+  struct mg_timer *tmp, *t = mgr->timers;
+  while (t != NULL) tmp = t->next, free(t), t = tmp;
+  mgr->timers = NULL;  // Important. Next call to poll won't touch timers
   for (c = mgr->conns; c != NULL; c = c->next) c->is_closing = 1;
   mg_mgr_poll(mgr, 0);
 #if MG_ARCH == MG_ARCH_FREERTOS_TCP

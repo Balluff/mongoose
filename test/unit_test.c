@@ -285,6 +285,10 @@ static void test_iobuf(void) {
 static void sntp_cb(struct mg_connection *c, int ev, void *evd, void *fnd) {
   if (ev == MG_EV_SNTP_TIME) {
     *(int64_t *) fnd = *(int64_t *) evd;
+  } else if (ev == MG_EV_POLL) {
+    // For some reason, GA on macos fails often, apparently SNTP request
+    // gets lost. We re-send it each poll
+    if (c->is_resolving == 0) mg_sntp_request(c);
   }
   (void) c;
 }
@@ -299,8 +303,8 @@ static void test_sntp(void) {
   c = mg_sntp_connect(&mgr, NULL, sntp_cb, &ms);
   ASSERT(c != NULL);
   ASSERT(c->is_udp == 1);
-  mg_sntp_send(c, (unsigned long) time(NULL));
-  for (i = 0; i < 300 && ms == 0; i++) mg_mgr_poll(&mgr, 10);
+  for (i = 0; i < 60 && ms == 0; i++) mg_mgr_poll(&mgr, 50);
+  MG_DEBUG(("ms: %lld", ms));
   ASSERT(ms > 0);
   mg_mgr_free(&mgr);
 
@@ -333,10 +337,25 @@ static void test_sntp(void) {
   ASSERT(mg_sntp_parse(NULL, 0) == -1);
 }
 
+struct mqtt_data {
+  char *buf;
+  int subscribed;
+  int published;
+};
+
 static void mqtt_cb(struct mg_connection *c, int ev, void *evd, void *fnd) {
-  char *buf = (char *) fnd;
+  struct mqtt_data *test_data = (struct mqtt_data *) fnd;
+  char *buf = test_data->buf;
   if (ev == MG_EV_MQTT_OPEN) {
     buf[0] = *(int *) evd == 0 ? 'X' : 'Y';
+  } else if (ev == MG_EV_MQTT_CMD) {
+    struct mg_mqtt_message *mm = (struct mg_mqtt_message *) evd;
+    if (mm->cmd == MQTT_CMD_SUBACK) {
+      test_data->subscribed = 1;
+    }
+    if (mm->cmd == MQTT_CMD_PUBACK) {
+      test_data->published = 1;
+    }
   } else if (ev == MG_EV_MQTT_MSG) {
     struct mg_mqtt_message *mm = (struct mg_mqtt_message *) evd;
     sprintf(buf + 1, "%.*s/%.*s", (int) mm->topic.len, mm->topic.ptr,
@@ -347,10 +366,12 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *evd, void *fnd) {
 
 static void test_mqtt(void) {
   char buf[50] = {0};
+  struct mqtt_data test_data = {buf, 0, 0};
   struct mg_mgr mgr;
   struct mg_str topic = mg_str("x/f12"), data = mg_str("hi");
   struct mg_connection *c;
   struct mg_mqtt_opts opts;
+  char rnd[9], client_id[16];
   // const char *url = "mqtt://mqtt.eclipse.org:1883";
   const char *url = "mqtt://broker.hivemq.com:1883";
   int i;
@@ -363,31 +384,51 @@ static void test_mqtt(void) {
   }
 
   // Connect with empty client ID
-  c = mg_mqtt_connect(&mgr, url, NULL, mqtt_cb, buf);
-  for (i = 0; i < 200 && buf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  c = mg_mqtt_connect(&mgr, url, NULL, mqtt_cb, &test_data);
+  for (i = 0; i < 300 && buf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  if (buf[0] != 'X') MG_INFO(("[%s]", buf));
   ASSERT(buf[0] == 'X');
+  ASSERT(test_data.subscribed == 0);
   mg_mqtt_sub(c, topic, 1);
+  for (i = 0; i < 500 && test_data.subscribed == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(test_data.subscribed == 1);
+  ASSERT(test_data.published == 0);
   mg_mqtt_pub(c, topic, data, 1, false);
-  for (i = 0; i < 300 && buf[1] == 0; i++) mg_mgr_poll(&mgr, 10);
-  // MG_INFO(("[%s]", buf));
+  for (i = 0; i < 500 && test_data.published == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(test_data.published == 1);
+  for (i = 0; i < 500 && buf[1] == 0; i++) mg_mgr_poll(&mgr, 10);
+  if (strcmp(buf, "Xx/f12/hi") != 0) MG_INFO(("[%s]", buf));
   ASSERT(strcmp(buf, "Xx/f12/hi") == 0);
 
   // Set params
+  test_data.subscribed = 0;
+  test_data.published = 0;
   memset(buf, 0, sizeof(buf));
   memset(&opts, 0, sizeof(opts));
   opts.clean = true;
   opts.will_qos = 1;
   opts.will_retain = true;
   opts.keepalive = 20;
-  opts.client_id = mg_str("mg_client");
+  mg_random(rnd, sizeof(rnd));
+  mg_base64_encode((unsigned char *) rnd, sizeof(rnd), client_id);
+  client_id[sizeof(client_id) - 1] = '\0';
+  opts.client_id = mg_str(client_id);
   opts.will_topic = mg_str("mg_will_topic");
   opts.will_message = mg_str("mg_will_messsage");
-  c = mg_mqtt_connect(&mgr, url, &opts, mqtt_cb, buf);
+  c = mg_mqtt_connect(&mgr, url, &opts, mqtt_cb, &test_data);
   for (i = 0; i < 300 && buf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  if (buf[0] != 'X') MG_INFO(("[%s]", buf));
   ASSERT(buf[0] == 'X');
+  ASSERT(test_data.subscribed == 0);
   mg_mqtt_sub(c, topic, 1);
+  for (i = 0; i < 500 && test_data.subscribed == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(test_data.subscribed == 1);
+  ASSERT(test_data.published == 0);
   mg_mqtt_pub(c, topic, data, 1, false);
+  for (i = 0; i < 500 && test_data.published == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(test_data.published == 1);
   for (i = 0; i < 500 && buf[1] == 0; i++) mg_mgr_poll(&mgr, 10);
+  if (strcmp(buf, "Xx/f12/hi") != 0) MG_INFO(("[%s]", buf));
   ASSERT(strcmp(buf, "Xx/f12/hi") == 0);
 
   mg_mgr_free(&mgr);
@@ -521,20 +562,23 @@ static bool cmpheader(const char *buf, const char *name, const char *value) {
 }
 
 static void wcb(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
+  int *p = (int *) fn_data;
   if (ev == MG_EV_WS_OPEN) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     struct mg_str *wsproto = mg_http_get_header(hm, "Sec-WebSocket-Protocol");
     ASSERT(wsproto != NULL);
     mg_ws_send(c, "boo", 3, WEBSOCKET_OP_BINARY);
+    mg_ws_send(c, "foobar", 6, WEBSOCKET_OP_BINARY);
     mg_ws_send(c, "", 0, WEBSOCKET_OP_PING);
-    ((int *) fn_data)[0] += 100;
+    p[0] += 100;
   } else if (ev == MG_EV_WS_MSG) {
     struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
-    if (mg_strstr(wm->data, mg_str("boo")))
+    if (mg_strstr(wm->data, mg_str("foobar")))
       mg_ws_send(c, "", 0, WEBSOCKET_OP_CLOSE);
-    ((int *) fn_data)[0]++;
+    if (mg_strstr(wm->data, mg_str("boo"))) p[0] += 2;
+    if (mg_strstr(wm->data, mg_str("foobar"))) p[0] += 3;
   } else if (ev == MG_EV_CLOSE) {
-    ((int *) fn_data)[0] += 10;
+    p[0] += 10;
   }
 }
 
@@ -549,7 +593,7 @@ static void test_ws(void) {
   mg_ws_connect(&mgr, url, wcb, &done, "%s", "Sec-WebSocket-Protocol: meh\r\n");
   for (i = 0; i < 30; i++) mg_mgr_poll(&mgr, 1);
   // MG_INFO(("--> %d", done));
-  ASSERT(done == 112);
+  ASSERT(done == 115);
 
   // Test that non-WS requests fail
   ASSERT(fetch(&mgr, buf, url, "GET /ws HTTP/1.0\r\n\n") == 426);
@@ -655,8 +699,8 @@ static void test_http_server(void) {
                      mg_str("text/html; charset=utf-8")) == 0);
   }
 
-  ASSERT(fetch(&mgr, buf, url, "GET /badroot HTTP/1.0\r\n\n") == 400);
-  ASSERT(cmpbody(buf, "Invalid web root [/BAAADDD!]\n") == 0);
+  ASSERT(fetch(&mgr, buf, url, "GET /badroot HTTP/1.0\r\n\n") == 404);
+  // ASSERT(cmpbody(buf, "Invalid web root [/BAAADDD!]\n") == 0);
 
   {
     char *data = mg_file_read(&mg_fs_posix, "./test/data/ca.pem", NULL);
@@ -796,7 +840,8 @@ static void f3(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   // MG_INFO(("%d", ev));
   if (ev == MG_EV_CONNECT) {
     // c->is_hexdumping = 1;
-    mg_printf(c, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n",
+    mg_printf(c, "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n",
+              c->rem.is_ip6 ? "" : "/robots.txt",
               c->rem.is_ip6 ? "ipv6.google.com" : "cesanta.com");
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
@@ -831,8 +876,10 @@ static void test_http_client(void) {
     c = mg_http_connect(&mgr, url, f3, &ok);
     ASSERT(c != NULL);
     mg_tls_init(c, &opts);
-    for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
+    for (i = 0; i < 1500 && ok <= 0; i++) mg_mgr_poll(&mgr, 1000);
     ASSERT(ok == 200);
+    c->is_closing = 1;
+    mg_mgr_poll(&mgr, 1);
 
     // Test failed host validation
     ok = 0;
@@ -842,6 +889,7 @@ static void test_http_client(void) {
     mg_tls_init(c, &opts);
     for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
     ASSERT(ok == 777);
+    mg_mgr_poll(&mgr, 1);
   }
 #endif
 
@@ -850,7 +898,6 @@ static void test_http_client(void) {
   // ipv6.google.com does not have IPv4 address, only IPv6, therefore
   // it is guaranteed to hit IPv6 resolution path.
   c = mg_http_connect(&mgr, "http://ipv6.google.com", f3, &ok);
-  ASSERT(c != NULL);
   for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
   ASSERT(ok == 200);
 #endif
@@ -863,19 +910,41 @@ static void f4(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     mg_printf(c, "HTTP/1.0 200 OK\n\n%.*s/%s", (int) hm->uri.len, hm->uri.ptr,
-              fn_data);
+              "abcdef");
+    strcat((char *) fn_data, "m");
     c->is_draining = 1;
+  } else if (ev == MG_EV_HTTP_CHUNK) {
+    strcat((char *) fn_data, "f");
+  } else if (ev == MG_EV_CLOSE) {
+    strcat((char *) fn_data, "c");
+  }
+}
+
+static void f4c(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
+  if (ev == MG_EV_CONNECT) {
+    mg_printf(c, "GET /foo/bar HTTP/1.0\n\n");
+  } else if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    ASSERT(mg_strcmp(hm->body, mg_str("/foo/bar/abcdef")) == 0);
+    strcat((char *) fn_data, "m");
+  } else if (ev == MG_EV_HTTP_CHUNK) {
+    strcat((char *) fn_data, "f");
+  } else if (ev == MG_EV_CLOSE) {
+    strcat((char *) fn_data, "c");
   }
 }
 
 static void test_http_no_content_length(void) {
+  char buf1[10] = {0}, buf2[10] = {0};
   struct mg_mgr mgr;
   const char *url = "http://127.0.0.1:12348";
-  char buf[FETCH_BUF_SIZE];
+  int i;
   mg_mgr_init(&mgr);
-  mg_http_listen(&mgr, url, f4, (void *) "baz");
-  ASSERT(fetch(&mgr, buf, url, "GET /foo/bar HTTP/1.0\r\n\n") == 200);
-  ASSERT(cmpbody(buf, "/foo/bar/baz") == 0);
+  mg_http_listen(&mgr, url, f4, (void *) buf1);
+  mg_http_connect(&mgr, url, f4c, (void *) buf2);
+  for (i = 0; i < 100 && strchr(buf2, 'c') == NULL; i++) mg_mgr_poll(&mgr, 1);
+  ASSERT(strcmp(buf1, "mc") == 0);
+  ASSERT(strcmp(buf2, "fcm") == 0);  // See #1475
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
 }
@@ -1103,103 +1172,104 @@ static void f1(void *arg) {
 
 static void test_timer(void) {
   int v1 = 0, v2 = 0, v3 = 0;
-  struct mg_timer t1, t2, t3;
+  struct mg_timer t1, t2, t3, *head = NULL;
 
-  MG_INFO(("g_timers: %p", g_timers));
-  ASSERT(g_timers == NULL);
+  mg_timer_init(&head, &t1, 5, MG_TIMER_REPEAT, f1, &v1);
+  mg_timer_init(&head, &t2, 15, MG_TIMER_ONCE, f1, &v2);
+  mg_timer_init(&head, &t3, 10, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, f1, &v3);
 
-  mg_timer_init(&t1, 5, MG_TIMER_REPEAT, f1, &v1);
-  mg_timer_init(&t2, 15, 0, f1, &v2);
-  mg_timer_init(&t3, 10, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, f1, &v3);
+  ASSERT(head == &t3);
+  ASSERT(head->next == &t2);
 
-  ASSERT(g_timers == &t3);
-  ASSERT(g_timers->next == &t2);
-
-  mg_timer_poll(0);
-  mg_timer_poll(1);
+  mg_timer_poll(&head, 0);
   ASSERT(v1 == 0);
   ASSERT(v2 == 0);
   ASSERT(v3 == 1);
 
-  mg_timer_poll(5);
+  mg_timer_poll(&head, 1);
+  ASSERT(v1 == 0);
+  ASSERT(v2 == 0);
+  ASSERT(v3 == 1);
+
+  mg_timer_poll(&head, 5);
   ASSERT(v1 == 1);
   ASSERT(v2 == 0);
   ASSERT(v3 == 1);
 
-  ASSERT(g_timers == &t3);
-  ASSERT(g_timers->next == &t2);
-
   // Simulate long delay - timers must invalidate expiration times
-  mg_timer_poll(100);
+  mg_timer_poll(&head, 100);
   ASSERT(v1 == 2);
   ASSERT(v2 == 1);
   ASSERT(v3 == 2);
 
-  ASSERT(g_timers == &t3);
-  ASSERT(g_timers->next == &t1);  // t2 should be removed
-  ASSERT(g_timers->next->next == NULL);
-
-  mg_timer_poll(107);
+  mg_timer_poll(&head, 107);
   ASSERT(v1 == 3);
   ASSERT(v2 == 1);
   ASSERT(v3 == 2);
 
-  mg_timer_poll(114);
+  mg_timer_poll(&head, 114);
   ASSERT(v1 == 4);
   ASSERT(v2 == 1);
   ASSERT(v3 == 3);
 
-  mg_timer_poll(115);
+  mg_timer_poll(&head, 115);
   ASSERT(v1 == 5);
   ASSERT(v2 == 1);
   ASSERT(v3 == 3);
 
-  mg_timer_init(&t2, 3, 0, f1, &v2);
-  ASSERT(g_timers == &t2);
-  ASSERT(g_timers->next == &t3);
-  ASSERT(g_timers->next->next == &t1);
-  ASSERT(g_timers->next->next->next == NULL);
+  mg_timer_free(&head, &t2);
+  mg_timer_init(&head, &t2, 3, 0, f1, &v2);
+  ASSERT(head == &t2);
+  ASSERT(head->next == &t3);
+  ASSERT(head->next->next == &t1);
+  ASSERT(head->next->next->next == NULL);
 
-  mg_timer_poll(120);
+  mg_timer_poll(&head, 120);
   ASSERT(v1 == 6);
   ASSERT(v2 == 1);
   ASSERT(v3 == 4);
 
-  mg_timer_poll(125);
+  mg_timer_poll(&head, 125);
   ASSERT(v1 == 7);
   ASSERT(v2 == 2);
   ASSERT(v3 == 4);
 
   // Test millisecond counter wrap - when time goes back.
-  mg_timer_poll(0);
+  mg_timer_poll(&head, 0);
   ASSERT(v1 == 7);
   ASSERT(v2 == 2);
   ASSERT(v3 == 4);
 
-  ASSERT(g_timers == &t3);
-  ASSERT(g_timers->next == &t1);
-  ASSERT(g_timers->next->next == NULL);
-
-  mg_timer_poll(7);
+  mg_timer_poll(&head, 7);
   ASSERT(v1 == 8);
   ASSERT(v2 == 2);
   ASSERT(v3 == 4);
 
-  mg_timer_poll(11);
+  mg_timer_poll(&head, 11);
   ASSERT(v1 == 9);
   ASSERT(v2 == 2);
   ASSERT(v3 == 5);
 
-  mg_timer_free(&t1);
-  ASSERT(g_timers == &t3);
-  ASSERT(g_timers->next == NULL);
+  mg_timer_free(&head, &t1);
+  ASSERT(head == &t2);
+  ASSERT(head->next == &t3);
+  ASSERT(head->next->next == NULL);
 
-  mg_timer_free(&t2);
-  ASSERT(g_timers == &t3);
-  ASSERT(g_timers->next == NULL);
+  mg_timer_free(&head, &t2);
+  ASSERT(head == &t3);
+  ASSERT(head->next == NULL);
 
-  mg_timer_free(&t3);
-  ASSERT(g_timers == NULL);
+  mg_timer_free(&head, &t3);
+  ASSERT(head == NULL);
+
+  // Test proper timer deallocation, see #1539
+  {
+    struct mg_mgr mgr;
+    mg_mgr_init(&mgr);
+    mg_timer_add(&mgr, 1, MG_TIMER_REPEAT, f1, NULL);
+    mg_mgr_free(&mgr);
+    ASSERT(mgr.conns == NULL);
+  }
 }
 
 static bool sn(const char *fmt, ...) {
@@ -1295,7 +1365,7 @@ static void fn1(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   (void) c;
 }
 
-static void test_dns_timeout(const char *dns_server_url, const char *errstr) {
+static void test_dns_error(const char *dns_server_url, const char *errstr) {
   // Test timeout
   struct mg_mgr mgr;
   char buf[100] = "";
@@ -1303,12 +1373,12 @@ static void test_dns_timeout(const char *dns_server_url, const char *errstr) {
   mg_mgr_init(&mgr);
   mgr.dns4.url = dns_server_url;
   mgr.dnstimeout = 10;
-  MG_DEBUG(("opening dummy DNS listener..."));
+  MG_DEBUG(("opening dummy DNS listener @ [%s]...", dns_server_url));
   mg_listen(&mgr, mgr.dns4.url, NULL, NULL);  // Just discard our queries
   mg_http_connect(&mgr, "http://google.com", fn1, buf);
   for (i = 0; i < 50 && buf[0] == '\0'; i++) mg_mgr_poll(&mgr, 1);
   mg_mgr_free(&mgr);
-  MG_DEBUG(("buf: [%s]", buf));
+  // MG_DEBUG(("buf: [%s] [%s]", buf, errstr));
   ASSERT(strcmp(buf, errstr) == 0);
 }
 
@@ -1358,19 +1428,17 @@ static void test_dns(void) {
     ASSERT(strcmp(dm.name, "new-fp-shed.wg1.b.yahoo.com") == 0);
   }
 
-  test_dns_timeout("udp://127.0.0.1:12345", "DNS timeout");
-  test_dns_timeout("", "resolver");
-  test_dns_timeout("tcp://0.0.0.0:0", "DNS error");
+  test_dns_error("udp://127.0.0.1:12345", "DNS timeout");
+  test_dns_error("", "resolver");
+  test_dns_error("tcp://0.0.0.0:0", "DNS error");
 }
 
 static void test_util(void) {
-  char buf[100], *s = mg_hexdump("abc", 3), *p;
+  char buf[100], *p, *s;
   struct mg_addr a;
-  ASSERT(s != NULL);
-  free(s);
   memset(&a, 0, sizeof(a));
   ASSERT(mg_file_printf(&mg_fs_posix, "data.txt", "%s", "hi") == true);
-  if (system("ls -l") != 0) (void) 0;
+  // if (system("ls -l") != 0) (void) 0;
   ASSERT((p = mg_file_read(&mg_fs_posix, "data.txt", NULL)) != NULL);
   ASSERT(strcmp(p, "hi") == 0);
   free(p);
@@ -1462,6 +1530,11 @@ static void test_util(void) {
   ASSERT(mg_to64(mg_str("-9223372036854775809")) == 0);
   ASSERT(mg_to64(mg_str("9223372036854775800")) == 0);
   ASSERT(mg_to64(mg_str("9223372036854775700")) > 0);
+  ASSERT(mg_tou64(mg_str("0")) == 0);
+  ASSERT(mg_tou64(mg_str("123")) == 123);
+  ASSERT(mg_tou64(mg_str("")) == 0);
+  ASSERT(mg_tou64(mg_str("-")) == 0);
+  ASSERT(mg_tou64(mg_str("18446744073709551615")) == 18446744073709551615U);
 }
 
 static void test_crc32(void) {
@@ -1613,18 +1686,20 @@ static void eh7(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
     sopts.fs = &mg_fs_packed;
     mg_http_serve_dir(c, hm, &sopts);
   }
-  (void) ev_data, (void) fn_data;
+  (void) fn_data;
 }
 
 static void test_packed(void) {
   struct mg_mgr mgr;
   const char *url = "http://127.0.0.1:12351";
-  char buf[FETCH_BUF_SIZE] = "",
-       *data = mg_file_read(&mg_fs_posix, "Makefile", NULL);
+  char buf[FETCH_BUF_SIZE],
+      *data = mg_file_read(&mg_fs_posix, "Makefile", NULL);
   mg_mgr_init(&mgr);
   mg_http_listen(&mgr, url, eh7, NULL);
 
   // Load top level file directly
+  fetch(&mgr, buf, url, "GET /Makefile HTTP/1.0\n\n");
+  printf("---> %s\n", buf);
   ASSERT(fetch(&mgr, buf, url, "GET /Makefile HTTP/1.0\n\n") == 200);
   ASSERT(cmpbody(buf, data) == 0);
   free(data);
@@ -1653,13 +1728,20 @@ static void eh6(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
   (void) c, (void) ev_data;
 }
 
+#if defined(__arm__) || defined(__riscv)
+int send(int sock, const void *buf, size_t len, int flags);
+int send(int sock, const void *buf, size_t len, int flags) {
+  (void) sock, (void) buf, (void) len, (void) flags;
+  return -1;
+}
+#endif
+
 static void test_pipe(void) {
   struct mg_mgr mgr;
-  struct mg_connection *c;
-  int i, done = 0;
+  int i, sock, done = 0;
   mg_mgr_init(&mgr);
-  ASSERT((c = mg_mkpipe(&mgr, eh6, (void *) &done)) != NULL);
-  mg_mgr_wakeup(c, "", 1);
+  ASSERT((sock = mg_mkpipe(&mgr, eh6, (void *) &done)) >= 0);
+  ASSERT(send(sock, "hi", 2, 0) == 2);
   for (i = 0; i < 10 && done == 0; i++) mg_mgr_poll(&mgr, 1);
   ASSERT(done == 1);
   mg_mgr_free(&mgr);

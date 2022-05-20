@@ -1,15 +1,11 @@
 #pragma once
 
+#ifndef MG_ENABLE_MIP
+#define MG_ENABLE_MIP 0
+#endif
+
 #ifndef MG_ENABLE_FATFS
 #define MG_ENABLE_FATFS 0
-#endif
-
-#ifndef MG_FATFS_ROOT
-#define MG_FATFS_ROOT "/"
-#endif
-
-#ifndef MG_FATFS_BSIZE
-#define MG_FATFS_BSIZE 64
 #endif
 
 #ifndef MG_ENABLE_SOCKET
@@ -29,15 +25,11 @@
 #endif
 
 #ifndef MG_ENABLE_SSI
-#define MG_ENABLE_SSI 1
+#define MG_ENABLE_SSI 0
 #endif
 
 #ifndef MG_ENABLE_IPV6
 #define MG_ENABLE_IPV6 0
-#endif
-
-#ifndef MG_ENABLE_LOG
-#define MG_ENABLE_LOG 1
 #endif
 
 #ifndef MG_ENABLE_MD5
@@ -55,6 +47,10 @@
 
 #ifndef MG_ENABLE_CUSTOM_RANDOM
 #define MG_ENABLE_CUSTOM_RANDOM 0
+#endif
+
+#ifndef MG_ENABLE_CUSTOM_MILLIS
+#define MG_ENABLE_CUSTOM_MILLIS 0
 #endif
 
 #ifndef MG_ENABLE_PACKED_FS
@@ -88,7 +84,7 @@
 #endif
 
 #ifndef MG_SOCK_LISTEN_BACKLOG_SIZE
-#define MG_SOCK_LISTEN_BACKLOG_SIZE 128
+#define MG_SOCK_LISTEN_BACKLOG_SIZE 3
 #endif
 
 #ifndef MG_DIRSEP
@@ -101,4 +97,8 @@
 #else
 #define MG_ENABLE_FILE 0
 #endif
+#endif
+
+#ifndef MG_PUTCHAR
+#define MG_PUTCHAR(x) putchar(x)
 #endif

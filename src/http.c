@@ -289,68 +289,20 @@ void mg_http_write_chunk(struct mg_connection *c, const char *buf, size_t len) {
 static const char *mg_http_status_code_str(int status_code) {
   switch (status_code) {
     case 100: return "Continue";
-    case 101: return "Switching Protocols";
-    case 102: return "Processing";
-    case 200: return "OK";
     case 201: return "Created";
     case 202: return "Accepted";
-    case 203: return "Non-authoritative Information";
     case 204: return "No Content";
-    case 205: return "Reset Content";
     case 206: return "Partial Content";
-    case 207: return "Multi-Status";
-    case 208: return "Already Reported";
-    case 226: return "IM Used";
-    case 300: return "Multiple Choices";
     case 301: return "Moved Permanently";
     case 302: return "Found";
-    case 303: return "See Other";
     case 304: return "Not Modified";
-    case 305: return "Use Proxy";
-    case 307: return "Temporary Redirect";
-    case 308: return "Permanent Redirect";
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
-    case 402: return "Payment Required";
     case 403: return "Forbidden";
     case 404: return "Not Found";
-    case 405: return "Method Not Allowed";
-    case 406: return "Not Acceptable";
-    case 407: return "Proxy Authentication Required";
-    case 408: return "Request Timeout";
-    case 409: return "Conflict";
-    case 410: return "Gone";
-    case 411: return "Length Required";
-    case 412: return "Precondition Failed";
-    case 413: return "Payload Too Large";
-    case 414: return "Request-URI Too Long";
-    case 415: return "Unsupported Media Type";
-    case 416: return "Requested Range Not Satisfiable";
-    case 417: return "Expectation Failed";
     case 418: return "I'm a teapot";
-    case 421: return "Misdirected Request";
-    case 422: return "Unprocessable Entity";
-    case 423: return "Locked";
-    case 424: return "Failed Dependency";
-    case 426: return "Upgrade Required";
-    case 428: return "Precondition Required";
-    case 429: return "Too Many Requests";
-    case 431: return "Request Header Fields Too Large";
-    case 444: return "Connection Closed Without Response";
-    case 451: return "Unavailable For Legal Reasons";
-    case 499: return "Client Closed Request";
     case 500: return "Internal Server Error";
     case 501: return "Not Implemented";
-    case 502: return "Bad Gateway";
-    case 503: return "Service Unavailable";
-    case 504: return "Gateway Timeout";
-    case 505: return "HTTP Version Not Supported";
-    case 506: return "Variant Also Negotiates";
-    case 507: return "Insufficient Storage";
-    case 508: return "Loop Detected";
-    case 510: return "Not Extended";
-    case 511: return "Network Authentication Required";
-    case 599: return "Network Connect Timeout Error";
     default: return "OK";
   }
 }
@@ -388,12 +340,13 @@ static void static_cb(struct mg_connection *c, int ev, void *ev_data,
   if (ev == MG_EV_WRITE || ev == MG_EV_POLL) {
     struct mg_fd *fd = (struct mg_fd *) fn_data;
     // Read to send IO buffer directly, avoid extra on-stack buffer
-    size_t n, max = 2 * MG_IO_SIZE;
+    size_t n, max = MG_IO_SIZE, space, *cl = (size_t *) c->label;
     if (c->send.size < max) mg_iobuf_resize(&c->send, max);
     if (c->send.len >= c->send.size) return;  // Rate limit
-    n = fd->fs->rd(fd->fd, c->send.buf + c->send.len,
-                   c->send.size - c->send.len);
+    if ((space = c->send.size - c->send.len) > *cl) space = *cl;
+    n = fd->fs->rd(fd->fd, c->send.buf + c->send.len, space);
     c->send.len += n;
+    *cl -= n;
     if (n == 0) restore_http_cb(c);
   } else if (ev == MG_EV_CLOSE) {
     restore_http_cb(c);
@@ -480,7 +433,8 @@ static int getrange(struct mg_str *s, int64_t *a, int64_t *b) {
 }
 
 void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
-                        const char *path, struct mg_http_serve_opts *opts) {
+                        const char *path,
+                        const struct mg_http_serve_opts *opts) {
   char etag[64];
   struct mg_fs *fs = opts->fs == NULL ? &mg_fs_posix : opts->fs;
   struct mg_fd *fd = mg_fs_open(fs, path, MG_FS_READ);
@@ -537,6 +491,7 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
     } else {
       c->pfn = static_cb;
       c->pfn_data = fd;
+      *(size_t *) c->label = (size_t) cl;  // Track to-be-sent content length
     }
   }
 }
@@ -544,7 +499,7 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
 struct printdirentrydata {
   struct mg_connection *c;
   struct mg_http_message *hm;
-  struct mg_http_serve_opts *opts;
+  const struct mg_http_serve_opts *opts;
   const char *dir;
 };
 
@@ -580,8 +535,8 @@ static void printdirentry(const char *name, void *userdata) {
 }
 
 static void listdir(struct mg_connection *c, struct mg_http_message *hm,
-                    struct mg_http_serve_opts *opts, char *dir) {
-  static const char *sort_js_code =
+                    const struct mg_http_serve_opts *opts, char *dir) {
+  const char *sort_js_code =
       "<script>function srt(tb, sc, so, d) {"
       "var tr = Array.prototype.slice.call(tb.rows, 0),"
       "tr = tr.sort(function (a, b) { var c1 = a.cells[sc], c2 = b.cells[sc],"
@@ -591,7 +546,7 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
       "return so * (t1 < 0 && t2 >= 0 ? -1 : t2 < 0 && t1 >= 0 ? 1 : "
       "n1 ? parseInt(n2) - parseInt(n1) : "
       "c1.textContent.trim().localeCompare(c2.textContent.trim())); });";
-  static const char *sort_js_code2 =
+  const char *sort_js_code2 =
       "for (var i = 0; i < tr.length; i++) tb.appendChild(tr[i]); "
       "if (!d) window.location.hash = ('sc=' + sc + '&so=' + so); "
       "};"
@@ -669,51 +624,46 @@ static void remove_double_dots(char *s) {
 static int uri_to_path2(struct mg_connection *c, struct mg_http_message *hm,
                         struct mg_fs *fs, struct mg_str url, struct mg_str dir,
                         char *path, size_t path_size) {
-  int flags = 0, tmp;
+  int flags, tmp;
   // Append URI to the root_dir, and sanitize it
   size_t n = mg_snprintf(path, path_size, "%.*s", (int) dir.len, dir.ptr);
   if (n > path_size) n = path_size;
   path[path_size - 1] = '\0';
-  if ((fs->st(path, NULL, NULL) & MG_FS_DIR) == 0) {
-    mg_http_reply(c, 400, "", "Invalid web root [%.*s]\n", (int) dir.len,
-                  dir.ptr);
-  } else {
-    if (n + 2 < path_size) path[n++] = '/', path[n] = '\0';
-    mg_url_decode(hm->uri.ptr + url.len, hm->uri.len - url.len, path + n,
-                  path_size - n, 0);
-    path[path_size - 1] = '\0';  // Double-check
-    remove_double_dots(path);
-    n = strlen(path);
-    MG_VERBOSE(("%lu %.*s -> %s", c->id, (int) hm->uri.len, hm->uri.ptr, path));
-    while (n > 0 && path[n - 1] == '/') path[--n] = 0;  // Trim trailing slashes
-    flags = fs->st(path, NULL, NULL);                   // Does it exist?
-    if (flags == 0) {
-      mg_http_reply(c, 404, "", "Not found\n");  // Does not exist, doh
-    } else if ((flags & MG_FS_DIR) && hm->uri.len > 0 &&
-               hm->uri.ptr[hm->uri.len - 1] != '/') {
-      mg_printf(c,
-                "HTTP/1.1 301 Moved\r\n"
-                "Location: %.*s/\r\n"
-                "Content-Length: 0\r\n"
-                "\r\n",
-                (int) hm->uri.len, hm->uri.ptr);
-      flags = 0;
-    } else if (flags & MG_FS_DIR) {
-      if (((mg_snprintf(path + n, path_size - n, "/" MG_HTTP_INDEX) > 0 &&
-            (tmp = fs->st(path, NULL, NULL)) != 0) ||
-           (mg_snprintf(path + n, path_size - n, "/index.shtml") > 0 &&
-            (tmp = fs->st(path, NULL, NULL)) != 0))) {
-        flags = tmp;
-      } else {
-        path[n] = '\0';  // Remove appended index file name
-      }
+  if (n + 2 < path_size) path[n++] = '/', path[n] = '\0';
+  mg_url_decode(hm->uri.ptr + url.len, hm->uri.len - url.len, path + n,
+                path_size - n, 0);
+  path[path_size - 1] = '\0';  // Double-check
+  remove_double_dots(path);
+  n = strlen(path);
+  MG_VERBOSE(("%lu %.*s -> %s", c->id, (int) hm->uri.len, hm->uri.ptr, path));
+  while (n > 0 && path[n - 1] == '/') path[--n] = 0;  // Trim trailing slashes
+  flags = mg_vcmp(&hm->uri, "/") == 0 ? MG_FS_DIR : fs->st(path, NULL, NULL);
+  if (flags == 0) {
+    mg_http_reply(c, 404, "", "Not found\n");  // Does not exist, doh
+  } else if ((flags & MG_FS_DIR) && hm->uri.len > 0 &&
+             hm->uri.ptr[hm->uri.len - 1] != '/') {
+    mg_printf(c,
+              "HTTP/1.1 301 Moved\r\n"
+              "Location: %.*s/\r\n"
+              "Content-Length: 0\r\n"
+              "\r\n",
+              (int) hm->uri.len, hm->uri.ptr);
+    flags = 0;
+  } else if (flags & MG_FS_DIR) {
+    if (((mg_snprintf(path + n, path_size - n, "/" MG_HTTP_INDEX) > 0 &&
+          (tmp = fs->st(path, NULL, NULL)) != 0) ||
+         (mg_snprintf(path + n, path_size - n, "/index.shtml") > 0 &&
+          (tmp = fs->st(path, NULL, NULL)) != 0))) {
+      flags = tmp;
+    } else {
+      path[n] = '\0';  // Remove appended index file name
     }
   }
   return flags;
 }
 
 static int uri_to_path(struct mg_connection *c, struct mg_http_message *hm,
-                       struct mg_http_serve_opts *opts, char *path,
+                       const struct mg_http_serve_opts *opts, char *path,
                        size_t path_size) {
   struct mg_fs *fs = opts->fs == NULL ? &mg_fs_posix : opts->fs;
   struct mg_str k, v, s = mg_str(opts->root_dir), u = {0, 0}, p = {0, 0};
@@ -727,12 +677,11 @@ static int uri_to_path(struct mg_connection *c, struct mg_http_message *hm,
 }
 
 void mg_http_serve_dir(struct mg_connection *c, struct mg_http_message *hm,
-                       struct mg_http_serve_opts *opts) {
+                       const struct mg_http_serve_opts *opts) {
   char path[MG_PATH_MAX] = "";
   const char *sp = opts->ssi_pattern;
   int flags = uri_to_path(c, hm, opts, path, sizeof(path));
   if (flags == 0) return;
-  MG_VERBOSE(("%.*s %s %d", (int) hm->uri.len, hm->uri.ptr, path, flags));
   if (flags & MG_FS_DIR) {
     listdir(c, hm, opts, path);
   } else if (sp != NULL && mg_globmatch(sp, strlen(sp), path, strlen(path))) {
@@ -863,9 +812,9 @@ static void walkchunks(struct mg_connection *c, struct mg_http_message *hm,
 }
 
 static bool mg_is_chunked(struct mg_http_message *hm) {
-  struct mg_str needle = mg_str_n("chunked", 7);
+  const char *needle = "chunked";
   struct mg_str *te = mg_http_get_header(hm, "Transfer-Encoding");
-  return te != NULL && mg_strstr(*te, needle) != NULL;
+  return te != NULL && mg_vcasecmp(te, needle) == 0;
 }
 
 void mg_http_delete_chunk(struct mg_connection *c, struct mg_http_message *hm) {

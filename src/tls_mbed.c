@@ -16,7 +16,6 @@ void mg_tls_free(struct mg_connection *c) {
     mbedtls_ssl_free(&tls->ssl);
     mbedtls_pk_free(&tls->pk);
     mbedtls_x509_crt_free(&tls->ca);
-    mbedtls_x509_crl_free(&tls->crl);
     mbedtls_x509_crt_free(&tls->cert);
     mbedtls_ssl_config_free(&tls->conf);
     free(tls);
@@ -25,15 +24,19 @@ void mg_tls_free(struct mg_connection *c) {
 }
 
 bool mg_sock_would_block(void);
+bool mg_sock_conn_reset(void);
 
 static int mg_net_send(void *ctx, const unsigned char *buf, size_t len) {
   struct mg_connection *c = (struct mg_connection *) ctx;
   int fd = (int) (size_t) c->fd;
   int n = (int) send(fd, buf, len, 0);
   MG_VERBOSE(("%lu n=%d, errno=%d", c->id, n, errno));
-  if (n > 0) return n;
-  if (n < 0 && mg_sock_would_block()) return MBEDTLS_ERR_SSL_WANT_WRITE;
-  return MBEDTLS_ERR_NET_SEND_FAILED;
+  if (n < 0) {
+    if (mg_sock_would_block()) return MBEDTLS_ERR_SSL_WANT_WRITE;
+    if (mg_sock_conn_reset()) return MBEDTLS_ERR_NET_CONN_RESET;
+    return MBEDTLS_ERR_NET_SEND_FAILED;
+  }
+  return n;
 }
 
 static int mg_net_recv(void *ctx, unsigned char *buf, size_t len) {
@@ -41,9 +44,12 @@ static int mg_net_recv(void *ctx, unsigned char *buf, size_t len) {
   int n, fd = (int) (size_t) c->fd;
   n = (int) recv(fd, buf, len, 0);
   MG_VERBOSE(("%lu n=%d, errno=%d", c->id, n, errno));
-  if (n > 0) return n;
-  if (n < 0 && mg_sock_would_block()) return MBEDTLS_ERR_SSL_WANT_READ;
-  return MBEDTLS_ERR_NET_RECV_FAILED;
+  if (n < 0) {
+    if (mg_sock_would_block()) return MBEDTLS_ERR_SSL_WANT_READ;
+    if (mg_sock_conn_reset()) return MBEDTLS_ERR_NET_CONN_RESET;
+    return MBEDTLS_ERR_NET_RECV_FAILED;
+  }
+  return n;
 }
 
 void mg_tls_handshake(struct mg_connection *c) {
@@ -90,7 +96,7 @@ static struct mg_str mg_loadfile(struct mg_fs *fs, const char *path) {
   return mg_str_n(p, n);
 }
 
-void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
+void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   struct mg_fs *fs = opts->fs == NULL ? &mg_fs_posix : opts->fs;
   struct mg_tls *tls = (struct mg_tls *) calloc(1, sizeof(*tls));
   int rc = 0;
@@ -103,7 +109,6 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
   mbedtls_ssl_init(&tls->ssl);
   mbedtls_ssl_config_init(&tls->conf);
   mbedtls_x509_crt_init(&tls->ca);
-  mbedtls_x509_crl_init(&tls->crl);
   mbedtls_x509_crt_init(&tls->cert);
   mbedtls_pk_init(&tls->pk);
   mbedtls_ssl_conf_dbg(&tls->conf, debug_cb, c);
@@ -121,18 +126,9 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
   if (opts->ca == NULL || strcmp(opts->ca, "*") == 0) {
     mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_NONE);
   } else if (opts->ca != NULL && opts->ca[0] != '\0') {
-    if (opts->crl != NULL && opts->crl[0] != '\0') {
-      struct mg_str s = mg_loadfile(fs, opts->crl);
-      rc = mbedtls_x509_crl_parse(&tls->crl, (uint8_t *) s.ptr, s.len + 1);
-      if (opts->crl[0] != '-') free((char *) s.ptr);
-      if (rc != 0) {
-        mg_error(c, "parse(%s) err %#x", opts->crl, -rc);
-        goto fail;
-      }
-    }
 #if defined(MBEDTLS_X509_CA_CHAIN_ON_DISK)
     tls->cafile = strdup(opts->ca);
-    rc = mbedtls_ssl_conf_ca_chain_file(&tls->conf, tls->cafile, &tls->crl);
+    rc = mbedtls_ssl_conf_ca_chain_file(&tls->conf, tls->cafile, NULL);
     if (rc != 0) {
       mg_error(c, "parse on-disk chain(%s) err %#x", tls->cafile, -rc);
       goto fail;
@@ -145,7 +141,7 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
       mg_error(c, "parse(%s) err %#x", opts->ca, -rc);
       goto fail;
     }
-    mbedtls_ssl_conf_ca_chain(&tls->conf, &tls->ca, &tls->crl);
+    mbedtls_ssl_conf_ca_chain(&tls->conf, &tls->ca, NULL);
 #endif
     if (opts->srvname.len > 0) {
       char mem[128], *buf = mem;
@@ -192,6 +188,11 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
   return;
 fail:
   mg_tls_free(c);
+}
+
+size_t mg_tls_pending(struct mg_connection *c) {
+  struct mg_tls *tls = (struct mg_tls *) c->tls;
+  return tls == NULL ? 0 : mbedtls_ssl_get_bytes_avail(&tls->ssl);
 }
 
 long mg_tls_recv(struct mg_connection *c, void *buf, size_t len) {

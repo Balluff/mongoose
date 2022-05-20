@@ -4,6 +4,7 @@
 #include "event.h"
 #include "iobuf.h"
 #include "str.h"
+#include "timer.h"
 
 struct mg_dns {
   const char *url;          // DNS server URL
@@ -22,8 +23,14 @@ struct mg_mgr {
   struct mg_dns dns4;           // DNS for IPv4
   struct mg_dns dns6;           // DNS for IPv6
   int dnstimeout;               // DNS resolve timeout in milliseconds
+  bool use_dns6;                // Use DNS6 server by default, see #1532
   unsigned long nextid;         // Next connection ID
   void *userdata;               // Arbitrary user data pointer
+  uint16_t mqtt_id;             // MQTT IDs for pub/sub
+  void *active_dns_requests;    // DNS requests in progress
+  struct mg_timer *timers;      // Active timers
+  void *priv;                   // Used by the experimental stack
+  size_t extraconnsize;         // Used by the experimental stack
 #if MG_ARCH == MG_ARCH_FREERTOS_TCP
   SocketSet_t ss;  // NOTE(lsm): referenced from socket struct
 #endif
@@ -68,6 +75,8 @@ struct mg_connection *mg_listen(struct mg_mgr *, const char *url,
                                 mg_event_handler_t fn, void *fn_data);
 struct mg_connection *mg_connect(struct mg_mgr *, const char *url,
                                  mg_event_handler_t fn, void *fn_data);
+struct mg_connection *mg_wrapfd(struct mg_mgr *mgr, int fd,
+                                mg_event_handler_t fn, void *fn_data);
 void mg_connect_resolved(struct mg_connection *);
 bool mg_send(struct mg_connection *, const void *, size_t);
 size_t mg_printf(struct mg_connection *, const char *fmt, ...);
@@ -75,11 +84,11 @@ size_t mg_vprintf(struct mg_connection *, const char *fmt, va_list ap);
 char *mg_straddr(struct mg_addr *, char *, size_t);
 bool mg_aton(struct mg_str str, struct mg_addr *addr);
 char *mg_ntoa(const struct mg_addr *addr, char *buf, size_t len);
-
-struct mg_connection *mg_mkpipe(struct mg_mgr *, mg_event_handler_t, void *);
-void mg_mgr_wakeup(struct mg_connection *pipe, const void *buf, size_t len);
+int mg_mkpipe(struct mg_mgr *, mg_event_handler_t, void *);
 
 // These functions are used to integrate with custom network stacks
 struct mg_connection *mg_alloc_conn(struct mg_mgr *);
 void mg_close_conn(struct mg_connection *c);
 bool mg_open_listener(struct mg_connection *c, const char *url);
+struct mg_timer *mg_timer_add(struct mg_mgr *mgr, uint64_t milliseconds,
+                              unsigned flags, void (*fn)(void *), void *arg);

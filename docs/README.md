@@ -134,7 +134,7 @@ to an event handler:
 enum {
   MG_EV_ERROR,       // Error                        char *error_message
   MG_EV_OPEN,        // Connection created           NULL
-  MG_EV_POLL,        // mg_mgr_poll iteration        int64_t *milliseconds
+  MG_EV_POLL,        // mg_mgr_poll iteration        uint64_t *milliseconds
   MG_EV_RESOLVE,     // Host name is resolved        NULL
   MG_EV_CONNECT,     // Connection established       NULL
   MG_EV_ACCEPT,      // Connection accepted          NULL
@@ -149,7 +149,7 @@ enum {
   MG_EV_MQTT_CMD,    // MQTT low-level command       struct mg_mqtt_message *
   MG_EV_MQTT_MSG,    // MQTT PUBLISH received        struct mg_mqtt_message *
   MG_EV_MQTT_OPEN,   // MQTT CONNACK received        int *connack_status_code
-  MG_EV_SNTP_TIME,   // SNTP time received           int64_t *milliseconds
+  MG_EV_SNTP_TIME,   // SNTP time received           uint64_t *milliseconds
   MG_EV_USER,        // Starting ID for user events
 };
 ```
@@ -188,6 +188,68 @@ struct mg_connection {
 };
 ```
 
+## Best practices
+
+- If you need to perform any sort of initialisation of your connection,
+  do it by catching `MG_EV_OPEN` event. That event is sent immediately
+  after a connection has been allocated and added to the event manager,
+  but before anything else:
+  ```c
+  static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
+    if (ev == MG_EV_OPEN) {
+      ... // Do your initialisation
+    }
+  ```
+- If you need to keep some connection-specific data, you have two options.
+  First, use `c->fn_data` pointer. That pointer is passed to the event handler
+  as last parameter:
+  ```c
+  static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
+    if (ev == MG_EV_OPEN) {
+      c->fn_data = malloc(123);       // Change our fn_data
+    } else if (ev == MG_EV_CLOSE) {
+      free(fn_data);  // Don't forget to free!
+    }
+    ...
+  }
+
+  // Every accepted connection inherit NULL pointer as c->fn_data, but we change
+  // it per-connection to something else
+  mg_http_listen(&mgr, "http://localhost:1234", fn, NULL);
+  ```
+  Another option is to use `c->label` buffer, which can
+  hold some amount of connection-specific data without extra memory allocation:
+  ```c
+  static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
+    if (ev == MG_EV_WS_OPEN) {
+      c->label[0] = 'W'; // Established websocket connection, store something
+      ...
+  ```
+- If you need to close the connection, set `c->is_draining = 1;` in your
+  event handler function. That tells the event manager to send all remaining
+  data in a send buffer ("drain" the connection), then close the connection.
+  If you need to close
+  the connection immediately without draining, use `c->is_closing = 1;`
+- Use `mg_http_reply()` function to create HTTP responses. That function
+  properly sets the `Content-Length` header, which is important. Of course
+  you can create responses manually, e.g. with `mg_printf()` function,
+  but be sure to set the `Content-Length` header:
+  ```c
+  mg_printf(c, "HTTP/1.1 200 OK\r\Content-Length: %d\r\n\r\n%s", 2, "hi");
+  ```
+  Alternatively, use chunked transfer enconding:
+  ```c
+  mg_printf(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+  mg_http_printf_chunk(c, "%s", "foo");
+  mg_http_printf_chunk(c, "%s", "bar");
+  mg_http_printf_chunk(c, "");  // Don't forget the last empty chunk
+  ```
+- On embedded environment, make sure that serving task has enough stack:
+  give it 2k for simple RESTful serving, or 4-8k for complex dynamic/static
+  serving. In certain environments, it is necessary to adjust heap size, too.
+  By default, IO buffer allocation size `MG_IO_SIZE` is 2048: change it to 512
+  to trim run-time per-connection memory consumption.
+
 ## Build options
 
 Mongoose source code ships in two files:
@@ -207,7 +269,7 @@ option during build time, use the `-D OPTION` compiler flag:
 $ cc app0.c mongoose.c                                        # Use defaults!
 $ cc app1.c mongoose.c -D MG_ENABLE_IPV6=1                    # Build with IPv6 enabled
 $ cc app2.c mongoose.c -D MG_ARCH=MG_ARCH_FREERTOS_LWIP       # Set architecture
-$ cc app3.c mongoose.c -D MG_ENABLE_SSI=0 -D MG_ENABLE_LOG=0  # Multiple options
+$ cc app3.c mongoose.c -D MG_ENABLE_SSI=0 -D MG_IO_SIZE=8192  # Multiple options
 ```
 
 The list of supported architectures is defined in the [arch.h](https://github.com/cesanta/mongoose/blob/master/src/arch.h)
@@ -236,20 +298,21 @@ Here is a list of build constants and their default values:
 |MG_ENABLE_SOCKET | 1 | Use BSD socket low-level API |
 |MG_ENABLE_MBEDTLS | 0 | Enable mbedTLS library |
 |MG_ENABLE_OPENSSL | 0 | Enable OpenSSL library |
-|MG_ENABLE_CUSTOM_TLS | 0 | Enable custom TLS library |
 |MG_ENABLE_IPV6 | 0 | Enable IPv6 |
-|MG_ENABLE_LOG | 1 | Enable `LOG()` macro |
 |MG_ENABLE_MD5 | 0 | Use native MD5 implementation |
 |MG_ENABLE_SSI | 1 | Enable serving SSI files by `mg_http_serve_dir()` |
 |MG_ENABLE_CUSTOM_RANDOM | 0 | Provide custom RNG function `mg_random()` |
+|MG_ENABLE_CUSTOM_TLS | 0 | Enable custom TLS library |
+|MG_ENABLE_CUSTOM_MILLIS | 0 | Enable custom `mg_millis()` function |
 |MG_ENABLE_PACKED_FS | 0 | Enable embedded FS support |
 |MG_ENABLE_FATFS | 0 | Enable embedded FAT FS support |
+|MG_ENABLE_LINES | undefined | If defined, show source file names in logs |
 |MG_IO_SIZE | 2048 | Granularity of the send/recv IO buffer growth |
 |MG_MAX_RECV_BUF_SIZE | (3 * 1024 * 1024) | Maximum recv buffer size |
 |MG_MAX_HTTP_HEADERS | 40 | Maximum number of HTTP headers |
 |MG_HTTP_INDEX | "index.html" | Index file for HTML directory |
 |MG_FATFS_ROOT | "/" | FAT FS root directory |
-|MG_ENABLE_LINES | undefined | If defined, show source file names in logs |
+|MG_PUTCHAR | putchar | Character output function, used by logging |
 
 <span class="badge bg-danger">NOTE:</span> the `MG_IO_SIZE` constant also sets
 maximum UDP message size, see
@@ -305,22 +368,29 @@ int mg_send(struct mg_connection *c, const void *buf, size_t len) {
 
 ## Minimal HTTP server
 
-This example is a simple static HTTP server that serves current directory:
+This example is a simple HTTP server that serves both static and dynamic content:
 
 ```c
 #include "mongoose.h"
 
 static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
-  struct mg_http_serve_opts opts = {.root_dir = "."};   // Serve local dir
-  if (ev == MG_EV_HTTP_MSG) mg_http_serve_dir(c, ev_data, &opts);
+  if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    if (mg_http_match_uri(hm, "/api/hello")) {
+      mg_http_reply(c, 200, "", "%s\n", "hi");  // Serve dynamic content
+    } else {
+      struct mg_http_serve_opts opts = {.root_dir = "."};   // Serve
+      mg_http_serve_dir(c, ev_data, &opts);                 // static content
+    }
+  }
 }
 
 int main(int argc, char *argv[]) {
   struct mg_mgr mgr;
-  mg_mgr_init(&mgr);                                        // Init manager
-  mg_http_listen(&mgr, "http://localhost:8000", fn, &mgr);  // Setup listener
-  for (;;) mg_mgr_poll(&mgr, 1000);                         // Event loop
-  mg_mgr_free(&mgr);                                        // Cleanup
+  mg_mgr_init(&mgr);                                      // Init manager
+  mg_http_listen(&mgr, "http://0.0.0.0:8000", fn, &mgr);  // Setup listener
+  for (;;) mg_mgr_poll(&mgr, 1000);                       // Event loop
+  mg_mgr_free(&mgr);                                      // Cleanup
   return 0;
 }
 ```
@@ -619,45 +689,52 @@ char buf[100];
 LOG(LL_INFO, ("%s", mg_straddr(&c->peer, buf, sizeof(buf))));
 ```
 
-### mg\_mkpipe()
+### mg\_wrapfd()
 
 ```c
-struct mg_connection *mg_mkpipe(struct mg_mgr *, mg_event_handler_t, void *);
+struct mg_connection *mg_wrapfd(struct mg_mgr *mgr, int fd,
+                                mg_event_handler_t fn, void *fn_data);
 ```
 
-Create a "pipe" connection which is safe to pass to a different task/thread
-and used to wake up event manager from a different task. These
-functions are designed to implement multi-threaded support, to handle two
-common use cases:
-
-- There are multiple consumer connections, e.g. connected websocket clients.
-  A server constantly pushes some data to all of them. In this case, a data
-  producer task should call `mg_mgr_wakeup()` as soon as more data is produced.
-  A pipe's event handler should push data to all client connection.
-  Use `c->label` to mark client connections.
-- In order to serve a request, a long blocking operation should be performed.
-  In this case, request handler assigns some marker to `c->label` and then
-  spawns a handler task and gives a pipe to a
-  handler task. A handler does its job, and when data is ready, wakes up a
-  manager. A pipe's event handler pushes data to a marked connection.
-
-Another task can wake up a sleeping event manager (in `mg_mgr_poll()` call)
-using `mg_mgr_wakeup()`. When an event manager is woken up, a pipe
-connection event handler function receives `MG_EV_READ` event.
+Wrap a given file descriptor `fd` into a connection, and add that connection
+to the event manager. An `fd` descriptor must suport `send()`, `recv()`,
+`select()` syscalls, and be non-blocking. Mongoose will treat it as a TCP
+socket. The `c->rem` and `c->loc` addresses will be empty.
 
 Parameters:
+- `fd` - A file descriptor to wrap
 - `mgr` - An event manager
 - `fn` - A pointer to event handler function
 - `ud` - A user data pointer. It will be passed to `fn` as `fn_data` parameter
 
-Return value: Pointer to created connection or `NULL` in case of error
+Return value: Pointer to the created connection or `NULL` in case of error
+
+### mg\_mkpipe()
+
+```c
+int mg_mkpipe(struct mg_mgr *mgr, mg_event_handler_t fn, void *fn_data);
+```
+
+Create two interconnected sockets for inter-thread communication. One socket
+is wrapped into a Mongoose connection and is added to the event manager.
+Another socket is returned, and supposed to be passed to a worker thread.
+When a worker thread `send()`s to socket any data, that wakes up `mgr` and
+`fn` event handler reveives `MG_EV_READ` event. Also, `fn` can send any
+data to a worker thread, which can be `recv()`ed by a worker thread.
+
+Parameters:
+- `mgr` - An event manager
+- `fn` - A pointer to event handler function
+- `fn_data` - A user data pointer. It will be passed to `fn` as `fn_data` parameter
+
+Return value: created socket, or `-1` on error
 
 Usage example: see [examples/multi-threaded](https://github.com/cesanta/mongoose/tree/master/examples/multi-threaded).
 
 ### mg\_mgr\_wakeup()
 
 ```c
-void mg_mgr_wakeup(struct mg_connection *pipe, const void *buf, size_len len);
+bool mg_mgr_wakeup(struct mg_connection *pipe, const void *buf, size_len len);
 ```
 
 Wake up an event manager that sleeps in `mg_mgr_poll()` call. This function
@@ -673,7 +750,7 @@ Parameters:
 - `buf` - a data to send to the pipe connection. Use `""` if there is no data 
 - `len` - a data length
 
-Return value: None
+Return value: `true` if data has been sent, `false` otherwise
 
 Usage example: see [examples/multi-threaded](https://github.com/cesanta/mongoose/tree/master/examples/multi-threaded).
 
@@ -1405,24 +1482,23 @@ static void sntp_cb(struct mg_connection *c, int ev, void *evd, void *fnd) {
 mg_sntp_connect(mgr&, NULL /* connect to time.google.com */, sntp_cb, NULL);
 ```
 
-### mg_sntp_send()
+### mg_sntp_request()
 
 ```c
-void mg_sntp_send(struct mg_connection *c, unsigned long utc)
+void mg_sntp_request(struct mg_connection *c)
 ```
 
-Send time request to SNTP server. Note: This app can't send SNTP request more often than every one hour.
+Send time request to SNTP server
 
 Parameters:
 - `c` - Connection to use
-- `utc` - Current time, used to verify if new request is possible.
 
 Return value: None
 
 Usage example:
 
 ```c
-mg_sntp_send(c, (unsigned long) time(NULL));
+mg_sntp_request(c);
 ```
 
 ## MQTT
@@ -1834,18 +1910,53 @@ mg_tls_init(c, &opts);
 
 ## Timer
 
+### mg\_timer\_add()
+
+```c
+struct timer *mg_timer_add(struct mg_mgr *mgr,
+                           uint64_t period_ms, unsigned flags,
+                           void (*fn)(void *), void *fn_data);
+```
+
+Setup a timer. This is a high-level timer API that allows to add a software
+timer to the event manager. This function `calloc()`s a new timer and
+adds it to the `mgr->timers` list. All added timers are polled when
+`mg_mgr_poll()` is called, and called if expired.
+
+<span class="badge bg-danger">NOTE: </span> Make sure that the timer
+interval is equal or more to the `mg_mgr_poll()` timeout.
+
+Parameters:
+- `mgr` - Pointer to `mg_mgr` event manager structure
+- `ms` - An interval in milliseconds
+- `flags` - Timer flags bitmask, `MG_TIMER_REPEAT` and `MG_TIMER_RUN_NOW`
+- `fn` - Function to invoke
+- `fn_data` - Function argument
+
+Return value: None
+
+Usage example:
+```c
+void timer_fn(void *data) {
+  // ...
+}
+
+mg_timer_add(mgr, 1000, MG_TIMER_REPEAT, timer_fn, NULL);
+```
+
 ### struct mg\_timer
 
 ```c
 struct mg_timer {
-  int64_t period_ms;        // Timer period in milliseconds
-  int64_t expire;           // Expiration timestamp in milliseconds
+  uint64_t period_ms;       // Timer period in milliseconds
+  uint64_t expire;          // Expiration timestamp in milliseconds
   unsigned flags;           // Possible flags values below
-#define MG_TIMER_REPEAT 1   // Call function periodically, otherwise run once
+#define MG_TIMER_ONCE 0     // Call function once
+#define MG_TIMER_REPEAT 1   // Call function periodically
 #define MG_TIMER_RUN_NOW 2  // Call immediately when timer is set
   void (*fn)(void *);       // Function to call
   void *arg;                // Function argument
-  struct mg_timer *next;    // Linkage in g_timers list
+  struct mg_timer *next;    // Linkage
 };
 ```
 
@@ -1855,13 +1966,15 @@ as the `mg_mgr_poll()` timeout argument in the main event loop.
 ### mg\_timer\_init()
 
 ```c
-void mg_timer_init(struct mg_timer *t, int64_t period_ms, unsigned flags,
+void mg_timer_init(struct mg_timer **head,
+                   struct mg_timer *t, uint64_t period_ms, unsigned flags,
                    void (*fn)(void *), void *fn_data);
 ```
 
 Setup a timer.
 
 Parameters:
+- `head` - Pointer to `mg_timer` list head
 - `t` - Pointer to `mg_timer` that should be initialized
 - `ms` - An interval in milliseconds
 - `flags` - Timer flags bitmask, `MG_TIMER_REPEAT` and `MG_TIMER_RUN_NOW`
@@ -1876,19 +1989,19 @@ void timer_fn(void *data) {
   // ...
 }
 
-struct mg_timer timer;
-mg_timer_init(&timer, 1000 /* 1sec */, MG_TIMER_REPEAT, timer_fn, NULL);
-// A timer gets initialized and linked into the internal timers list
+struct mg_timer timer, *head = NULL;
+mg_timer_init(&head, &timer, 1000, MG_TIMER_REPEAT, timer_fn, NULL);
 ```
 
 ### mg\_timer\_free()
 
 ```c
-void mg_timer_free(struct mg_timer *t);
+void mg_timer_free(struct mg_timer **head, struct mg_timer *t);
 ```
 Free timer, remove it from the internal timers list.
 
 Parameters:
+- `head` - Pointer to `mg_timer` list head
 - `t` - Timer to free
 
 Return value: None
@@ -1903,7 +2016,7 @@ mg_timer_free(&timer);
 ### mg\_timer\_poll()
 
 ```c
-void mg_timer_poll(int64_t uptime_ms);
+void mg_timer_poll(struct mg_timer **head, uint64_t uptime_ms);
 ```
 
 Traverse list of timers and call them if current timestamp `uptime_ms` is
@@ -1913,6 +2026,7 @@ Note, that `mg_mgr_poll` function internally calls `mg_timer_poll`; therefore,
 in most cases it is unnecessary to call it explicitly.
 
 Parameters:
+- `head` - Pointer to `mg_timer` list head
 - `uptime_ms` - current timestamp
 
 Return value: None
@@ -1920,8 +2034,7 @@ Return value: None
 Usage example:
 
 ```c
-int64_t now = mg_millis();
-mg_timer_poll(now);
+mg_timer_poll(mg_millis());
 ```
 
 ## Time
@@ -2151,7 +2264,7 @@ Usage example:
 struct mg_str str1 = mg_str("hello");
 struct mg_str str2 = mg_strdup(str1);
 //...
-free(str1.ptr);
+free(str2.ptr);
 ```
 
 
@@ -2268,30 +2381,6 @@ struct mg_str k, v, s = mg_str("a=333,b=777");
 while (mg_commalist(&s, &k, &v))                      // This loop output:
   printf("[%.*s] set to [%.*s]\n",                    // [a] set to [333]
          (int) k.len, k.ptr, (int) v.len, v.ptr);     // [b] set to [777]
-```
-
-### mg\_hexdump()
-
-```c
-char *mg_hexdump(const void *buf, int len);
-```
-
-Hexdump binary data `buf`, `len` into malloc-ed buffer and return it.
-It is a caller's responsibility to free() returned pointer.
-
-Parameters:
-- `buf` - Data to hexdump
-- `len` - Data length
-
-Return value: malloc-ed buffer with hexdumped data
-
-Usage example:
-
-```c
-char arr[] = "\0x1\0x2\0x3";
-char *hex = mg_hexdump(arr, sizeof(arr));
-LOG(LL_INFO, ("%s", hex)); // Output "0000  01 02 03 00";
-free(hex);
 ```
 
 ### mg\_hex()
@@ -2442,6 +2531,7 @@ mg_snprintf(buf, sizeof(buf), "%%-%3s", "a");           // %-  a
 
 ```c
 int64_t mg_to64(struct mg_str str);
+uint64_t mg_tou64(struct mg_str str);
 ```
 
 Parse 64-bit integer value held by string `s`.
@@ -3336,27 +3426,17 @@ use these functions for its own purposes as well as the rest of Mongoose API.
 
 ```c
 #define LOG(level, args)
+#define MG_ERROR(args) MG_LOG(MG_LL_ERROR, args)
+#define MG_INFO(args) MG_LOG(MG_LL_INFO, args)
+#define MG_DEBUG(args) MG_LOG(MG_LL_DEBUG, args)
+#define MG_VERBOSE(args) MG_LOG(MG_LL_VERBOSE, args)
 ```
 
-General way to log is using `LOG` macro.
-`LOG` prints to log only is `MG_ENABLE_LOG` macro defined, otherwise is does nothing.
-
-This macro has two arguments: log level and information to log. The second argument is a printf-alike format string.
-
-Log levels defined as:
-```c
-enum { LL_NONE, LL_ERROR, LL_INFO, LL_DEBUG, LL_VERBOSE_DEBUG };
-```
-
-Parameters:
-- `level` - Log level, see levels above
-- `args` - Information to log
-
-Return value: None
-
+Logging macros.
 Usage example:
+
 ```c
-LOG(LL_ERROR, ("Hello %s!", "world"));  // Output "Hello, world"
+MG_INFO(("Hello %s!", "world"));  // Output "Hello, world"
 ```
 
 ### mg\_log\_set()
@@ -3389,32 +3469,24 @@ mg_log_set("2");                  // Set log level to info
 mg_log_set("2,foo.c=3,bar.c=0");  // Set log level to info, with overrides
 ```
 
-### mg\_log\_set\_callback()
+### mg\_hexdump()
 
 ```c
-void mg_log_set_callback(void (*fn)(const void *, size_t, void *), void *fnd);
+void mg_hexdump(const void *buf, int len);
 ```
 
-By default, `LOG` writes to standard output stream (aka `stdout`), but this behaviour
-can be changes via `mg_log_set_callback`. This function allows to set callback,
-which called once mongoose (or host application) calls `LOG`
+Log a hex dump of binary data `buf`, `len`.
 
 Parameters:
-- `fn` - callback function, should be called on logging
-- `fnd` - user parameter to pass to `fn`
+- `buf` - Data pointer
+- `len` - Data length
 
 Return value: none
 
 Usage example:
 
 ```c
-void log_via_printf(const void *buf, size_t len, void *userdata) {
-  (void) userdata;
-  printf("*.%s", buf, len);
-}
-
-// ...
-mg_log_set_callback(&log_via_printf, NULL);
+mg_hexdump(c->recv.buf, c->recv.len);  // Hex dump incoming data
 ```
 
 ## Filesystem

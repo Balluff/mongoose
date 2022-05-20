@@ -31,7 +31,7 @@ static void mg_send_u16(struct mg_connection *c, uint16_t value) {
   mg_send(c, &value, sizeof(value));
 }
 
-void mg_mqtt_login(struct mg_connection *c, struct mg_mqtt_opts *opts) {
+void mg_mqtt_login(struct mg_connection *c, const struct mg_mqtt_opts *opts) {
   char rnd[9], client_id[16];
   struct mg_str cid = opts->client_id;
   uint32_t total_len = 7 + 1 + 2 + 2;
@@ -95,20 +95,18 @@ void mg_mqtt_pub(struct mg_connection *c, struct mg_str topic,
   mg_send_u16(c, mg_htons((uint16_t) topic.len));
   mg_send(c, topic.ptr, topic.len);
   if (qos > 0) {
-    static uint16_t s_id;
-    if (++s_id == 0) s_id++;
-    mg_send_u16(c, mg_htons(s_id));
+    if (++c->mgr->mqtt_id == 0) ++c->mgr->mqtt_id;
+    mg_send_u16(c, mg_htons(c->mgr->mqtt_id));
   }
   mg_send(c, data.ptr, data.len);
 }
 
 void mg_mqtt_sub(struct mg_connection *c, struct mg_str topic, int qos) {
-  static uint16_t s_id;
   uint8_t qos_ = qos & 3;
   uint32_t total_len = 2 + (uint32_t) topic.len + 2 + 1;
   mg_mqtt_send_header(c, MQTT_CMD_SUBSCRIBE, 2, total_len);
-  if (++s_id == 0) ++s_id;
-  mg_send_u16(c, mg_htons(s_id));
+  if (++c->mgr->mqtt_id == 0) ++c->mgr->mqtt_id;
+  mg_send_u16(c, mg_htons(c->mgr->mqtt_id));
   mg_send_u16(c, mg_htons((uint16_t) topic.len));
   mg_send(c, topic.ptr, topic.len);
   mg_send(c, &qos_, sizeof(qos_));
@@ -258,7 +256,7 @@ void mg_mqtt_disconnect(struct mg_connection *nc) {
 }
 
 struct mg_connection *mg_mqtt_connect(struct mg_mgr *mgr, const char *url,
-                                      struct mg_mqtt_opts *opts,
+                                      const struct mg_mqtt_opts *opts,
                                       mg_event_handler_t fn, void *fn_data) {
   struct mg_connection *c = mg_connect(mgr, url, fn, fn_data);
   if (c != NULL) {

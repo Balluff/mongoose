@@ -19,7 +19,7 @@ static int mg_tls_err(struct mg_tls *tls, int res) {
   return err;
 }
 
-void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
+void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   struct mg_tls *tls = (struct mg_tls *) calloc(1, sizeof(*tls));
   const char *id = "mongoose";
   static unsigned char s_initialised = 0;
@@ -88,6 +88,7 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
 #endif
     }
   }
+#if OPENSSL_VERSION_NUMBER > 0x10002000L
   if (opts->srvname.len > 0) {
     char mem[128], *buf = mem;
     size_t len = mg_asprintf(&buf, sizeof(mem), "%.*s", (int) opts->srvname.len,
@@ -95,6 +96,7 @@ void mg_tls_init(struct mg_connection *c, struct mg_tls_opts *opts) {
     X509_VERIFY_PARAM_set1_host(SSL_get0_param(tls->ssl), buf, len);
     if (buf != mem) free(buf);
   }
+#endif
   if (opts->ciphers != NULL) SSL_set_cipher_list(tls->ssl, opts->ciphers);
   if (opts->srvname.len > 0) {
     char mem[128], *buf = mem;
@@ -137,6 +139,11 @@ void mg_tls_free(struct mg_connection *c) {
   SSL_CTX_free(tls->ctx);
   free(tls);
   c->tls = NULL;
+}
+
+size_t mg_tls_pending(struct mg_connection *c) {
+  struct mg_tls *tls = (struct mg_tls *) c->tls;
+  return tls == NULL ? 0 : (size_t) SSL_pending(tls->ssl);
 }
 
 long mg_tls_recv(struct mg_connection *c, void *buf, size_t len) {
